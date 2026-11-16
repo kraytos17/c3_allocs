@@ -10,7 +10,7 @@ import std::core::mem;
  The pool borrows its storage and is not thread-safe. The storage must outlive
  the pool and every allocation from it.
 *>
-struct PoolAllocator (Allocator)
+struct PoolAllocator (Allocator) @mustinit
 {
 	char[] data;
 	PoolSlot* free_head;

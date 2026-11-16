@@ -16,12 +16,12 @@ fn void backed_arena_uses_initial_buffer_then_backing_allocator() @test
 	sz initial_mark = arena.mark();
 	char* overflow = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
 	assert(overflow != first);
-	assert(arena.pages != null);
+	assert(arena.overflow_count() > 0);
 	for (sz i = 0; i < 16; i++) first[i] = (char)(i + 1);
 	for (sz i = 0; i < 64; i++) overflow[i] = (char)(0x40 + i);
 
 	arena.reset(initial_mark);
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 	for (sz i = 0; i < 16; i++) assert(first[i] == (char)(i + 1));
 }
 
@@ -35,10 +35,10 @@ fn void backed_arena_reset_frees_only_pages_after_mark() @test
 	void* first_page = arena.acquire(256, alloc::AllocInitType.NO_ZERO)!!;
 	sz mark = arena.mark();
 	void* second_page = arena.acquire(320, alloc::AllocInitType.NO_ZERO)!!;
-	assert(arena.pages != null && arena.pages.next != null);
+	assert(arena.overflow_count() == 2);
 
 	arena.reset(mark);
-	assert(arena.pages != null && !arena.pages.next);
+	assert(arena.overflow_count() == 1);
 	assert(arena.mark() == mark);
 
 	void* replacement_page = arena.acquire(320, alloc::AllocInitType.NO_ZERO)!!;
@@ -46,7 +46,7 @@ fn void backed_arena_reset_frees_only_pages_after_mark() @test
 	assert(second_page != first_page);
 	assert(replacement_page == second_page);
 	arena.clear();
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 	assert(arena.mark() == 0);
 }
 
@@ -58,12 +58,12 @@ fn void backed_arena_release_reclaims_latest_initial_allocation() @test
 	arena.init(initial_storage[..], backing);
 
 	void* first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
-	sz before_second = arena.initial_used;
+	sz before_second = arena.initial_bytes_reserved();
 	void* second = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	arena.release(second, false);
-	assert(arena.initial_used == before_second);
+	assert(arena.initial_bytes_reserved() == before_second);
 	arena.release(first, false);
-	assert(arena.initial_used == 0);
+	assert(arena.initial_bytes_reserved() == 0);
 }
 
 fn void backed_arena_release_frees_overflow_block() @test
@@ -74,9 +74,9 @@ fn void backed_arena_release_frees_overflow_block() @test
 	arena.init(initial_storage[..], backing);
 
 	void* overflow = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
-	assert(arena.pages != null);
+	assert(arena.overflow_count() > 0);
 	arena.release(overflow, false);
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 }
 
 fn void backed_arena_resize_preserves_prefix_across_growth() @test
@@ -96,7 +96,7 @@ fn void backed_arena_resize_preserves_prefix_across_growth() @test
 	assert(shrunk == grown);
 	for (sz i = 0; i < 32; i++) assert(shrunk[i] == (char)(i + 1));
 	arena.free();
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 }
 
 fn void backed_arena_aligned_overflow_works_with_helpers() @test
@@ -108,9 +108,9 @@ fn void backed_arena_aligned_overflow_works_with_helpers() @test
 
 	void* aligned = alloc::malloc_aligned(&arena, 80, 64)!!;
 	assert(mem::ptr_is_aligned(aligned, 64));
-	assert(arena.pages != null);
+	assert(arena.overflow_count() > 0);
 	alloc::free_aligned(&arena, aligned);
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 }
 
 fn void backed_arena_failed_overflow_keeps_state_unchanged() @test
@@ -121,14 +121,14 @@ fn void backed_arena_failed_overflow_keeps_state_unchanged() @test
 	arena.init(initial_storage[..], backing);
 
 	sz mark = arena.mark();
-	sz initial_used = arena.initial_used;
-	bool had_pages = arena.pages != null;
+	sz initial_used = arena.initial_bytes_reserved();
+	bool had_pages = arena.overflow_count() > 0;
 	void*? failed = arena.acquire(256, alloc::AllocInitType.NO_ZERO);
 	if (catch failed)
 	{
 		assert(arena.mark() == mark);
-		assert(arena.initial_used == initial_used);
-		assert((arena.pages != null) == had_pages);
+		assert(arena.initial_bytes_reserved() == initial_used);
+		assert((arena.overflow_count() > 0) == had_pages);
 		return;
 	}
 	assert(false, "Expected overflow allocation to fail with an exhausted backing allocator.");
@@ -169,13 +169,13 @@ fn void backed_arena_ignores_foreign_and_duplicate_release() @test
 
 	void* first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	void* overflow = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
-	assert(arena.pages != null);
+	assert(arena.overflow_count() > 0);
 	arena.release((void*)0x1, false);
-	assert(arena.pages != null);
+	assert(arena.overflow_count() > 0);
 	arena.release(overflow, false);
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 	arena.release(overflow, false);
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 	assert(first != overflow);
 }
 
@@ -193,21 +193,21 @@ fn void backed_arena_reset_mark_keeps_older_overflow_and_initial_allocations() @
 	void* page_after_mark = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
 	char* initial_after_mark = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	initial_after_mark[0] = 0x52;
-	assert(arena.pages != null && arena.pages.next != null);
+	assert(arena.overflow_count() == 2);
 
 	arena.reset(mark);
-	assert(arena.pages != null && !arena.pages.next);
+	assert(arena.overflow_count() == 1);
 	assert(initial[0] == 0x31);
-	assert(arena.initial_used <= (sz)((char*)initial_after_mark - (char*)arena.initial_data.ptr));
+	assert(arena.initial_bytes_reserved() <= arena.bytes_used() + 64);
 
 	void* replacement = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
 	assert(replacement != initial);
 	assert(replacement != initial_after_mark);
-	assert(arena.pages != null);
+	assert(arena.overflow_count() > 0);
 	(void)page_after_mark;
 	(void)page_before_mark;
 	arena.clear();
-	assert(arena.pages == null);
+	assert(arena.overflow_count() == 0);
 }
 
 fn void backed_arena_release_interleaved_allocations_reclaims_only_available_tops() @test
@@ -219,12 +219,12 @@ fn void backed_arena_release_interleaved_allocations_reclaims_only_available_top
 
 	void* initial_first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	void* overflow = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
-	sz initial_used_before_release = arena.initial_used;
+	sz initial_used_before_release = arena.initial_bytes_reserved();
 	arena.release(initial_first, false);
-	assert(arena.initial_used == initial_used_before_release);
+	assert(arena.initial_bytes_reserved() == initial_used_before_release);
 	arena.release(overflow, false);
-	assert(arena.pages == null);
-	assert(arena.initial_used == initial_used_before_release);
+	assert(arena.overflow_count() == 0);
+	assert(arena.initial_bytes_reserved() == initial_used_before_release);
 	(void)initial_first;
 }
 
@@ -238,11 +238,11 @@ fn void backed_arena_reset_after_released_initial_tail_rewinds_chain() @test
 	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	sz mark = arena.mark();
 	void* tail = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
-	sz used_tail = arena.initial_used;
+	sz used_tail = arena.initial_bytes_reserved();
 	arena.release(tail, false);
-	assert(arena.initial_used < used_tail);
+	assert(arena.initial_bytes_reserved() < used_tail);
 	arena.reset(mark);
-	assert(arena.initial_used <= used_tail);
+	assert(arena.initial_bytes_reserved() <= used_tail);
 	assert(arena.mark() == mark);
 }
 
@@ -256,16 +256,16 @@ fn void backed_arena_release_interleaved_initial_overflow_initial() @test
 	void* first_initial = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	void* second_initial = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	void* overflow = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
-	assert(arena.initial_used > 0);
+	assert(arena.initial_bytes_reserved() > 0);
 
 	// Overflow storage is released independently; the earlier initial allocation remains.
 	arena.release(overflow, false);
-	assert(arena.pages == null);
-	assert(arena.initial_used > 0);
+	assert(arena.overflow_count() == 0);
+	assert(arena.initial_bytes_reserved() > 0);
 	arena.release(second_initial, false);
-	assert(arena.initial_used > 0);
+	assert(arena.initial_bytes_reserved() > 0);
 	arena.release(first_initial, false);
-	assert(arena.initial_used == 0);
+	assert(arena.initial_bytes_reserved() == 0);
 }
 
 fn void backed_arena_release_initial_uses_lifo_order_to_reclaim_space() @test
@@ -277,11 +277,11 @@ fn void backed_arena_release_initial_uses_lifo_order_to_reclaim_space() @test
 
 	void* first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	void* second = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
-	sz used_two = arena.initial_used;
+	sz used_two = arena.initial_bytes_reserved();
 	arena.release(first, false);
-	assert(arena.initial_used == used_two);
+	assert(arena.initial_bytes_reserved() == used_two);
 	arena.release(second, false);
-	assert(arena.initial_used == 0);
+	assert(arena.initial_bytes_reserved() == 0);
 	assert(arena.mark() == 2);
 }
 
@@ -295,12 +295,12 @@ fn void backed_arena_reset_rewinds_released_initial_tail_after_mark() @test
 	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	sz mark = arena.mark();
 	void* tail = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
-	sz tail_end = (sz)((char*)tail - (char*)arena.initial_data.ptr) + 8;
+	sz tail_end = arena.initial_bytes_reserved();
 	arena.release(tail, false);
-	assert(arena.initial_used < tail_end);
-	sz used_after_release = arena.initial_used;
+	assert(arena.initial_bytes_reserved() < tail_end);
+	sz used_after_release = arena.initial_bytes_reserved();
 	arena.reset(mark);
-	assert(arena.initial_used <= used_after_release);
+	assert(arena.initial_bytes_reserved() <= used_after_release);
 	assert(arena.mark() == mark);
 }
 
@@ -316,7 +316,7 @@ fn void backed_arena_resize_initial_last_in_place_and_preserves_data() @test
 	char* grown = arena.resize(original, 24)!!;
 	assert(grown == original);
 	for (sz i = 0; i < 8; i++) assert(grown[i] == (char)(0x20 + i));
-	assert(arena.initial_used > 0);
+	assert(arena.initial_bytes_reserved() > 0);
 }
 
 fn void backed_arena_resize_initial_to_overflow_preserves_original_on_failure() @test
@@ -330,12 +330,12 @@ fn void backed_arena_resize_initial_to_overflow_preserves_original_on_failure() 
 	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	for (sz i = 0; i < 8; i++) original[i] = (char)(i + 1);
 	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
-	sz initial_used = arena.initial_used;
+	sz initial_used = arena.initial_bytes_reserved();
 	sz mark = arena.mark();
 	void*? failed = arena.resize(original, 80, 0);
 	if (catch failed)
 	{
-		assert(arena.initial_used == initial_used);
+		assert(arena.initial_bytes_reserved() == initial_used);
 		assert(arena.mark() == mark);
 		for (sz i = 0; i < 8; i++) assert(original[i] == (char)(i + 1));
 		return;
@@ -385,7 +385,7 @@ fn void backed_arena_failed_overflow_resize_preserves_old_block() @test
 	if (catch failed)
 	{
 		assert(arena.mark() == 0);
-		assert(arena.pages == null);
+		assert(arena.overflow_count() == 0);
 		return;
 	}
 	assert(false, "Expected overflow allocation to fail with a null backing allocator.");

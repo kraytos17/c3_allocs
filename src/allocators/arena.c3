@@ -13,7 +13,7 @@ import std::core::mem;
  arena invalidates all allocations made after the chosen position; no object
  destructors are run.
 *>
-struct ArenaAllocator (Allocator)
+struct ArenaAllocator (Allocator) @mustinit
 {
 	char[] data;
 	sz used;
@@ -41,6 +41,23 @@ fn ArenaAllocator* ArenaAllocator.init(&self, char[] data)
 	self.used = 0;
 	return self;
 }
+
+<*
+ Return the capacity of the borrowed arena buffer in bytes.
+
+ @param [&in] self : "The arena to query"
+ @return "The total size of the borrowed buffer"
+*>
+fn sz ArenaAllocator.capacity(&self) => self.data.len;
+
+<*
+ Return the number of bytes reserved in the arena, including alignment padding
+ and allocation headers.
+
+ @param [&in] self : "The arena to query"
+ @return "The current arena position"
+*>
+fn sz ArenaAllocator.bytes_reserved(&self) => self.used;
 
 <*
  Discard all allocations made from this arena.

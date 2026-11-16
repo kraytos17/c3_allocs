@@ -13,7 +13,7 @@ const BACKED_ARENA_HEADER_MAGIC @local = 0xBAA2E_A11C0C;
  and released by reset/clear or free. The arena and its backing allocator are
  not thread-safe.
 *>
-struct BackedArenaAllocator (Allocator)
+struct BackedArenaAllocator (Allocator) @mustinit
 {
 	char[] initial_data;
 	Allocator backing_allocator;
@@ -79,6 +79,60 @@ fn BackedArenaAllocator* BackedArenaAllocator.init(&self, char[] initial_data, A
  @return "A mark for the current allocation sequence"
 *>
 fn sz BackedArenaAllocator.mark(&self) => self.next_sequence - 1;
+
+<*
+ Return the number of live overflow blocks owned by this arena.
+
+ @param [&in] self : "The arena to inspect"
+ @return "The live overflow-block count"
+*>
+fn sz BackedArenaAllocator.overflow_count(&self)
+{
+	sz count = 0;
+	BackedArenaPage* page = self.pages;
+	while (page)
+	{
+		count++;
+		page = page.next;
+	}
+	return count;
+}
+
+<*
+ Return the total requested payload size of all live allocations.
+
+ This excludes headers, alignment padding, and backing allocator overhead.
+
+ @param [&in] self : "The arena to inspect"
+ @return "The number of live requested payload bytes"
+*>
+fn sz BackedArenaAllocator.bytes_used(&self)
+{
+	sz total = 0;
+	BackedArenaHeader* header = self.last_initial_header;
+	while (header)
+	{
+		if (header.in_use) total += header.size;
+		header = header.previous;
+	}
+
+	BackedArenaPage* page = self.pages;
+	while (page)
+	{
+		total += page.requested_size;
+		page = page.next;
+	}
+	return total;
+}
+
+<*
+ Return the number of bytes consumed in the borrowed initial buffer, including
+ allocation headers and alignment padding.
+
+ @param [&in] self : "The arena to inspect"
+ @return "The current initial-buffer position"
+*>
+fn sz BackedArenaAllocator.initial_bytes_reserved(&self) => self.initial_used;
 
 <*
  Reset to a mark, invalidating allocations made after it.
