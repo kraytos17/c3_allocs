@@ -135,3 +135,43 @@ fn void sizeclass_ignores_foreign_release() @test
 	sc.release(item, false);
 	assert(sc.available() == used + 1);
 }
+
+fn void sizeclass_preset_uses_stepped_table() @test
+{
+	char[5120] storage;
+	allocators::SizeClassAllocator sc;
+	sc.init_preset(storage[..], 5);
+	assert(sc.class_count() == 5);
+	assert(sc.class_block_size(0) == 24);
+	assert(sc.class_block_size(1) == 48);
+	assert(sc.class_block_size(2) == 96);
+	assert(sc.class_block_size(3) == 192);
+	assert(sc.class_block_size(4) == 384);
+	assert(sc.class_available(0) > 0);
+	assert(sc.class_available(4) > 0);
+
+	void* small = sc.acquire(20, alloc::AllocInitType.NO_ZERO)!!;
+	void* big = sc.acquire(300, alloc::AllocInitType.NO_ZERO)!!;
+	assert(small != null && big != null);
+	sc.release(small, false);
+	sc.release(big, false);
+	assert(sc.available() == sc.capacity());
+}
+
+fn void sizeclass_preset_smaller_counts_cover_larger_requests() @test
+{
+	char[1024] storage;
+	allocators::SizeClassAllocator sc;
+	sc.init_preset(storage[..], 3);
+	assert(sc.class_count() == 3);
+	assert(sc.class_block_size(2) == 96);
+	void* item = sc.acquire(80, alloc::AllocInitType.NO_ZERO)!!;
+	assert(item != null);
+	sc.release(item, false);
+	void*? failed = sc.acquire(200, alloc::AllocInitType.NO_ZERO);
+	if (catch failed)
+	{
+		return;
+	}
+	assert(false, "Expected requests beyond the largest preset class to fail.");
+}

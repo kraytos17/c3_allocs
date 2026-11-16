@@ -289,6 +289,16 @@ void* item = alloc::malloc(&sc, 24); // Served by the 32-byte class.
 alloc::free(&sc, item);
 ```
 
+For the common case there is a preset constructor: give it one buffer and
+a class count, and it splits the buffer evenly across a stepped table of
+`24 << k` byte classes (24, 48, 96, 192, 384, ...):
+
+```c3
+char[5120] storage;
+allocators::SizeClassAllocator sc;
+sc.init_preset(storage[..], 5); // Classes 24, 48, 96, 192, 384.
+```
+
 ### Size-class guidance
 
 - Prefer stepped tables where most requests land, then factored growth:
@@ -301,6 +311,9 @@ alloc::free(&sc, item);
   and `class_available(i)` inspect one class. Requests larger than every
   class report `INVALID_ALLOC_SIZE`; a full fitting class reports
   `OUT_OF_MEMORY`.
+- `init_preset` divides one buffer evenly across classes. With a small
+  count, later preset classes are absent, so requests larger than the
+  biggest configured class fail.
 
 ## Using `ScratchAllocator`
 

@@ -69,6 +69,51 @@ fn SizeClassAllocator* SizeClassAllocator.init(&self, char[][] buffers, sz[] blo
 }
 
 <*
+ Initialize a dispatcher with a built-in stepped size table over one buffer.
+
+ The stepped table covers common small mixed allocations: 24, 48, 96, 192,
+ and 384 bytes for five classes, and 24, 48, 96, 192, 384, 768, 1536, and
+ 3072 bytes for eight classes (the smaller prefixes repeat the last listed
+ step pattern: sizes always follow 24 * 2^k, doubling per class). The
+ buffer is divided equally among classes in order; each class gets
+ `buffer_len / class_count` bytes. Remaining classes beyond the requested
+ count stay empty and never serve requests.
+
+ @param [&out] self : "The dispatcher to initialize"
+ @param storage : "The single borrowed buffer divided across classes"
+ @param class_count : "How many size classes to configure, 1..SIZE_CLASS_MAX"
+ @param alignment : "The maximum supported alignment for all classes, or zero for default"
+ @return "A pointer to the initialized dispatcher"
+ @require class_count >= 1 && class_count <= SIZE_CLASS_MAX : "Class count out of range"
+*>
+fn SizeClassAllocator* SizeClassAllocator.init_preset(&self, char[] storage, sz class_count, sz alignment = 0)
+{
+	assert(class_count >= 1 && class_count <= SIZE_CLASS_MAX, "Size class count out of range.");
+	assert(allocator_valid_alignment(alignment), "Size class alignment must be valid.");
+
+	sz share = storage.len / class_count;
+	char[][SIZE_CLASS_MAX] slices;
+	for (sz i = 0; i < class_count; i++)
+	{
+		sz begin = i * share;
+		sz end = (i + 1) * share;
+		if (end > storage.len) end = storage.len;
+		slices[i] = storage[begin:end - begin];
+	}
+
+	sz count = class_count;
+	PoolAllocator[SIZE_CLASS_MAX] pools;
+	for (sz i = 0; i < count; i++)
+	{
+		pools[i].init(slices[i], (sz)24 << i, alignment);
+	}
+
+	self.pools = pools;
+	self.num_classes = count;
+	return self;
+}
+
+<*
  Return the number of configured size classes.
 
  @param [&in] self : "The dispatcher to query"
