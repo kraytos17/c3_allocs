@@ -249,9 +249,10 @@ list.clear(); // Discards all allocations at once.
 
 ### Shared core and typed helpers
 
-- `src/allocators/common.c3` holds the shared alignment, padding, and
-  effective-alignment helpers used by all allocators. Helpers shared across
-  files are `@private`; file-local helpers stay `@local`.
+- `src/allocators/common.c3` holds the shared alignment, padding,
+  effective-alignment, range, and split helpers used by all allocators.
+  They are public so custom allocators can reuse them; file-local helpers
+  stay `@local`.
 - Use the standard `alloc::new` / `alloc::new_try` macros for typed
   allocation; they derive size and alignment from the type. For pools, use
   `pool_init_for{Type}(&pool, storage[..])` to size slots from a type.

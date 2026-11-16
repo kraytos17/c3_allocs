@@ -114,7 +114,8 @@ fn void*? ArenaAllocator.acquire(&self, sz size, AllocInitType init_type, sz ali
 	if (self.used > self.data.len) return mem::OUT_OF_MEMORY~;
 	if (size > self.data.len) return mem::INVALID_ALLOC_SIZE~;
 	if (self.data.len < ArenaHeader::size) return mem::OUT_OF_MEMORY~;
-	if (self.used > sz::max - ArenaHeader::size) return mem::OUT_OF_MEMORY~;
+	sz after_header_check;
+	if (!allocator_checked_add(self.used, ArenaHeader::size, &after_header_check)) return mem::OUT_OF_MEMORY~;
 
 	sz previous_used = self.used;
 	alignment = allocator_effective_alignment(alignment);

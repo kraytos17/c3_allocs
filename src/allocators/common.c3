@@ -1,3 +1,13 @@
+<*
+ Shared alignment, layout, and validation helpers for this module's allocators.
+
+ Error contract shared by every allocator here: invalid sizes (zero or
+ negative), invalid alignments, and sizes that overflow layout arithmetic
+ report `INVALID_ALLOC_SIZE`. Exhaustion of the borrowed buffer or failure
+ of a backing allocator reports `OUT_OF_MEMORY`. A failed `acquire` or
+ `resize` leaves the allocator state unchanged and preserves the original
+ block.
+*>
 module c3_allocs::allocators;
 
 import std::core::mem::alloc;
@@ -12,7 +22,7 @@ import std::core::mem;
  @param alignment : "The requested alignment, or zero for the default"
  @return "True when the alignment is zero or a valid C3 alignment"
 *>
-fn bool allocator_valid_alignment(sz alignment) @private => !alignment || mem::is_valid_alignment(alignment);
+fn bool allocator_valid_alignment(sz alignment) => !alignment || mem::is_valid_alignment(alignment);
 
 <*
  Return the effective alignment for a request.
@@ -26,7 +36,7 @@ fn bool allocator_valid_alignment(sz alignment) @private => !alignment || mem::i
 *>
 fn sz allocator_effective_alignment(
 	sz alignment
-) @private => alignment < mem::DEFAULT_MEM_ALIGNMENT ? mem::DEFAULT_MEM_ALIGNMENT : alignment;
+) => alignment < mem::DEFAULT_MEM_ALIGNMENT ? mem::DEFAULT_MEM_ALIGNMENT : alignment;
 
 <*
  Return the effective alignment with an additional minimum.
@@ -38,7 +48,7 @@ fn sz allocator_effective_alignment(
  @param minimum : "The minimum alignment the caller can accept"
  @return "The alignment to use for layout calculations"
 *>
-fn sz allocator_effective_alignment_min(sz alignment, sz minimum) @private
+fn sz allocator_effective_alignment_min(sz alignment, sz minimum)
 {
 	sz effective = allocator_effective_alignment(alignment);
 	return effective < minimum ? minimum : effective;
@@ -51,7 +61,7 @@ fn sz allocator_effective_alignment_min(sz alignment, sz minimum) @private
  @param alignment : "The target alignment, which must be a valid power of two"
  @return "The number of bytes to advance the address"
 *>
-fn sz allocator_padding(uptr address, sz alignment) @private => (sz)((-address) & ((uptr)alignment - 1));
+fn sz allocator_padding(uptr address, sz alignment) => (sz)((-address) & ((uptr)alignment - 1));
 
 <*
  Round an address up to the requested alignment.
@@ -63,7 +73,7 @@ fn sz allocator_padding(uptr address, sz alignment) @private => (sz)((-address) 
 fn uptr allocator_align_up_address(
 	uptr address,
 	sz alignment
-) @private => (address + (uptr)alignment - 1) & ~((uptr)alignment - 1);
+) => (address + (uptr)alignment - 1) & ~((uptr)alignment - 1);
 
 <*
  Round a byte count up to the requested alignment.
@@ -72,20 +82,24 @@ fn uptr allocator_align_up_address(
  @param alignment : "The target alignment, which must be a valid power of two"
  @return "The smallest multiple of `alignment` at or above `value`"
 *>
-fn sz allocator_align_up_size(sz value, sz alignment) @private => mem::aligned_offset(value, alignment);
+fn sz allocator_align_up_size(sz value, sz alignment) => mem::aligned_offset(value, alignment);
 
 <*
- Error contract shared by every allocator in this module.
+ Add two byte counts with overflow and negativity checks.
 
- Invalid sizes (zero or negative), invalid alignments, and sizes that
- overflow layout arithmetic report `INVALID_ALLOC_SIZE`. Exhaustion of the
- borrowed buffer or failure of a backing allocator reports `OUT_OF_MEMORY`.
- A failed `acquire` or `resize` leaves the allocator state unchanged and
- preserves the original block.
-
- @param size : "Unused, this documents the module-wide contract"
+ @param a : "The first byte count, must not be negative"
+ @param b : "The second byte count, must not be negative"
+ @param out : "Receives the sum when the addition is valid"
+ @return "True when the sum fit, false on overflow or negative input"
 *>
-fn void allocator_error_contract(sz size) @private => (void)size;
+fn bool allocator_checked_add(sz a, sz b, sz* out)
+{
+	if (a < 0 || b < 0) return false;
+	if (a > sz::max - b) return false;
+
+	*out = a + b;
+	return true;
+}
 
 <*
  Check whether a `[address, address + size)` range lies in a borrowed buffer.
@@ -96,7 +110,7 @@ fn void allocator_error_contract(sz size) @private => (void)size;
  @param size : "The candidate range byte count, must not be negative"
  @return "True when the whole range is inside the buffer"
 *>
-fn bool allocator_contains(uptr base, sz len, uptr address, sz size) @private
+fn bool allocator_contains(uptr base, sz len, uptr address, sz size)
 {
 	if (size < 0) return false;
 	if (len < 0) return false;
@@ -115,7 +129,7 @@ fn bool allocator_contains(uptr base, sz len, uptr address, sz size) @private
  @param size : "The requested payload byte count"
  @param init_type : "Whether the payload must be zero-initialized"
 *>
-fn void allocator_zero_if(void* payload, sz size, AllocInitType init_type) @private
+fn void allocator_zero_if(void* payload, sz size, AllocInitType init_type)
 {
 	if (init_type == ZERO) mem::clear(payload, size, mem::DEFAULT_MEM_ALIGNMENT);
 }
@@ -136,8 +150,7 @@ fn uptr allocator_payload_address(
 	uptr block_start,
 	sz header_size,
 	sz effective_alignment
-) @private => allocator_align_up_address(block_start + (uptr)header_size, effective_alignment);
-
+) => allocator_align_up_address(block_start + (uptr)header_size, effective_alignment);
 
 <*
  Decide the allocated size for a free range, splitting only when useful.
@@ -153,7 +166,7 @@ fn uptr allocator_payload_address(
  @param min_remainder : "The smallest useful remainder range"
  @return "The bytes to allocate from the front of the free range"
 *>
-fn sz allocator_split_size(sz total_needed, sz split_alignment, sz free_size, sz min_remainder) @private
+fn sz allocator_split_size(sz total_needed, sz split_alignment, sz free_size, sz min_remainder)
 {
 	sz alloc_size = allocator_align_up_size(total_needed, split_alignment);
 	if (alloc_size <= free_size && free_size - alloc_size >= min_remainder) return alloc_size;
