@@ -7,62 +7,55 @@ import c3_allocs::allocators;
 fn void backed_arena_uses_initial_buffer_then_backing_allocator() @test
 {
 	char[128] initial_storage;
-	char[1024] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	char* first = arena.acquire(16, alloc::AllocInitType.ZERO)!!;
 	for (sz i = 0; i < 16; i++) assert(first[i] == 0);
 	sz initial_mark = arena.mark();
 	char* overflow = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
 	assert(overflow != first);
-	assert(backing.available() < backing.capacity());
+	assert(arena.pages != null);
 	for (sz i = 0; i < 16; i++) first[i] = (char)(i + 1);
 	for (sz i = 0; i < 64; i++) overflow[i] = (char)(0x40 + i);
 
 	arena.reset(initial_mark);
-	assert(backing.available() == backing.capacity());
+	assert(arena.pages == null);
 	for (sz i = 0; i < 16; i++) assert(first[i] == (char)(i + 1));
 }
 
 fn void backed_arena_reset_frees_only_pages_after_mark() @test
 {
 	char[16] initial_storage;
-	char[1024] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
-	void* first_page = arena.acquire(48, alloc::AllocInitType.NO_ZERO)!!;
+	void* first_page = arena.acquire(256, alloc::AllocInitType.NO_ZERO)!!;
 	sz mark = arena.mark();
-	void* second_page = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
-	sz available_with_two_pages = backing.available();
-	assert(available_with_two_pages < backing.capacity());
+	void* second_page = arena.acquire(320, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.pages != null && arena.pages.next != null);
 
 	arena.reset(mark);
-	assert(backing.available() > available_with_two_pages);
+	assert(arena.pages != null && !arena.pages.next);
 	assert(arena.mark() == mark);
 
-	void* replacement_page = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	void* replacement_page = arena.acquire(320, alloc::AllocInitType.NO_ZERO)!!;
 	assert(replacement_page != first_page);
 	assert(second_page != first_page);
 	assert(replacement_page == second_page);
 	arena.clear();
-	assert(backing.available() == backing.capacity());
+	assert(arena.pages == null);
 	assert(arena.mark() == 0);
 }
 
 fn void backed_arena_release_reclaims_latest_initial_allocation() @test
 {
 	char[128] initial_storage;
-	char[512] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	void* first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	sz before_second = arena.initial_used;
@@ -76,27 +69,22 @@ fn void backed_arena_release_reclaims_latest_initial_allocation() @test
 fn void backed_arena_release_frees_overflow_block() @test
 {
 	char[8] initial_storage;
-	char[512] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	void* overflow = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
-	sz available_before_free = backing.available();
-	assert(available_before_free < backing.capacity());
+	assert(arena.pages != null);
 	arena.release(overflow, false);
-	assert(backing.available() == backing.capacity());
+	assert(arena.pages == null);
 }
 
 fn void backed_arena_resize_preserves_prefix_across_growth() @test
 {
 	char[16] initial_storage;
-	char[1024] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	char* original = arena.acquire(48, alloc::AllocInitType.NO_ZERO)!!;
 	for (sz i = 0; i < 48; i++) original[i] = (char)(i + 1);
@@ -108,43 +96,39 @@ fn void backed_arena_resize_preserves_prefix_across_growth() @test
 	assert(shrunk == grown);
 	for (sz i = 0; i < 32; i++) assert(shrunk[i] == (char)(i + 1));
 	arena.free();
-	assert(backing.available() == backing.capacity());
+	assert(arena.pages == null);
 }
 
 fn void backed_arena_aligned_overflow_works_with_helpers() @test
 {
 	char[16] initial_storage;
-	char[1024] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	void* aligned = alloc::malloc_aligned(&arena, 80, 64)!!;
 	assert(mem::ptr_is_aligned(aligned, 64));
-	assert(backing.available() < backing.capacity());
+	assert(arena.pages != null);
 	alloc::free_aligned(&arena, aligned);
-	assert(backing.available() == backing.capacity());
+	assert(arena.pages == null);
 }
 
 fn void backed_arena_failed_overflow_keeps_state_unchanged() @test
 {
 	char[8] initial_storage;
-	char[64] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 32, 16);
+	Allocator backing = &std::core::mem::allocators::NULL_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	sz mark = arena.mark();
 	sz initial_used = arena.initial_used;
-	sz backing_available = backing.available();
+	bool had_pages = arena.pages != null;
 	void*? failed = arena.acquire(256, alloc::AllocInitType.NO_ZERO);
 	if (catch failed)
 	{
 		assert(arena.mark() == mark);
 		assert(arena.initial_used == initial_used);
-		assert(backing.available() == backing_available);
+		assert((arena.pages != null) == had_pages);
 		return;
 	}
 	assert(false, "Expected overflow allocation to fail with an exhausted backing allocator.");
@@ -153,11 +137,9 @@ fn void backed_arena_failed_overflow_keeps_state_unchanged() @test
 fn void backed_arena_invalid_requests_do_not_mutate_state() @test
 {
 	char[64] initial_storage;
-	char[256] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::NULL_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	sz mark = arena.mark();
 	void*? zero = arena.acquire(0, alloc::AllocInitType.NO_ZERO);
@@ -181,20 +163,230 @@ fn void backed_arena_invalid_requests_do_not_mutate_state() @test
 fn void backed_arena_ignores_foreign_and_duplicate_release() @test
 {
 	char[128] initial_storage;
-	char[512] backing_storage;
-	allocators::PoolAllocator backing;
-	backing.init(backing_storage[..], 256, 64);
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
-	arena.init(initial_storage[..], &backing);
+	arena.init(initial_storage[..], backing);
 
 	void* first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
 	void* overflow = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
-	sz backing_available = backing.available();
-	arena.release(&backing_storage[0], false);
-	assert(backing.available() == backing_available);
+	assert(arena.pages != null);
+	arena.release((void*)0x1, false);
+	assert(arena.pages != null);
 	arena.release(overflow, false);
-	assert(backing.available() == backing.capacity());
+	assert(arena.pages == null);
 	arena.release(overflow, false);
-	assert(backing.available() == backing.capacity());
+	assert(arena.pages == null);
 	assert(first != overflow);
+}
+
+fn void backed_arena_reset_mark_keeps_older_overflow_and_initial_allocations() @test
+{
+	char[512] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	char* initial = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	initial[0] = 0x31;
+	void* page_before_mark = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
+	sz mark = arena.mark();
+	void* page_after_mark = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
+	char* initial_after_mark = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	initial_after_mark[0] = 0x52;
+	assert(arena.pages != null && arena.pages.next != null);
+
+	arena.reset(mark);
+	assert(arena.pages != null && !arena.pages.next);
+	assert(initial[0] == 0x31);
+	assert(arena.initial_used <= (sz)((char*)initial_after_mark - (char*)arena.initial_data.ptr));
+
+	void* replacement = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
+	assert(replacement != initial);
+	assert(replacement != initial_after_mark);
+	assert(arena.pages != null);
+	(void)page_after_mark;
+	(void)page_before_mark;
+	arena.clear();
+	assert(arena.pages == null);
+}
+
+fn void backed_arena_release_interleaved_allocations_reclaims_only_available_tops() @test
+{
+	char[64] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	void* initial_first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	void* overflow = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
+	sz initial_used_before_release = arena.initial_used;
+	arena.release(initial_first, false);
+	assert(arena.initial_used == initial_used_before_release);
+	arena.release(overflow, false);
+	assert(arena.pages == null);
+	assert(arena.initial_used == initial_used_before_release);
+	(void)initial_first;
+}
+
+fn void backed_arena_reset_after_released_initial_tail_rewinds_chain() @test
+{
+	char[256] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz mark = arena.mark();
+	void* tail = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz used_tail = arena.initial_used;
+	arena.release(tail, false);
+	assert(arena.initial_used < used_tail);
+	arena.reset(mark);
+	assert(arena.initial_used <= used_tail);
+	assert(arena.mark() == mark);
+}
+
+fn void backed_arena_release_interleaved_initial_overflow_initial() @test
+{
+	char[1024] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	void* first_initial = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	void* second_initial = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	void* overflow = arena.acquire(1200, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.initial_used > 0);
+
+	// Overflow storage is released independently; the earlier initial allocation remains.
+	arena.release(overflow, false);
+	assert(arena.pages == null);
+	assert(arena.initial_used > 0);
+	arena.release(second_initial, false);
+	assert(arena.initial_used > 0);
+	arena.release(first_initial, false);
+	assert(arena.initial_used == 0);
+}
+
+fn void backed_arena_release_initial_uses_lifo_order_to_reclaim_space() @test
+{
+	char[256] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	void* first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	void* second = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz used_two = arena.initial_used;
+	arena.release(first, false);
+	assert(arena.initial_used == used_two);
+	arena.release(second, false);
+	assert(arena.initial_used == 0);
+	assert(arena.mark() == 2);
+}
+
+fn void backed_arena_reset_rewinds_released_initial_tail_after_mark() @test
+{
+	char[256] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz mark = arena.mark();
+	void* tail = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz tail_end = (sz)((char*)tail - (char*)arena.initial_data.ptr) + 8;
+	arena.release(tail, false);
+	assert(arena.initial_used < tail_end);
+	sz used_after_release = arena.initial_used;
+	arena.reset(mark);
+	assert(arena.initial_used <= used_after_release);
+	assert(arena.mark() == mark);
+}
+
+fn void backed_arena_resize_initial_last_in_place_and_preserves_data() @test
+{
+	char[256] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	char* original = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 8; i++) original[i] = (char)(0x20 + i);
+	char* grown = arena.resize(original, 24)!!;
+	assert(grown == original);
+	for (sz i = 0; i < 8; i++) assert(grown[i] == (char)(0x20 + i));
+	assert(arena.initial_used > 0);
+}
+
+fn void backed_arena_resize_initial_to_overflow_preserves_original_on_failure() @test
+{
+	char[256] initial_storage;
+	Allocator backing = &std::core::mem::allocators::NULL_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	char* original = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 8; i++) original[i] = (char)(i + 1);
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz initial_used = arena.initial_used;
+	sz mark = arena.mark();
+	void*? failed = arena.resize(original, 80, 0);
+	if (catch failed)
+	{
+		assert(arena.initial_used == initial_used);
+		assert(arena.mark() == mark);
+		for (sz i = 0; i < 8; i++) assert(original[i] == (char)(i + 1));
+		return;
+	}
+	assert(false, "Expected resize to report failure without invalidating the old block.");
+}
+
+fn void backed_arena_resize_overflow_with_stricter_alignment_moves_safely() @test
+{
+	char[8] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	char* original = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 64; i++) original[i] = (char)(i ^ 0x5A);
+	char* resized = arena.resize(original, 96, 64)!!;
+	assert(mem::ptr_is_aligned(resized, 64));
+	for (sz i = 0; i < 64; i++) assert(resized[i] == (char)(i ^ 0x5A));
+}
+
+fn void backed_arena_can_reuse_a_mark_after_reset() @test
+{
+	char[128] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz mark = arena.mark();
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	arena.reset(mark);
+	assert(arena.mark() == mark);
+	(void)arena.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	arena.reset(mark);
+	assert(arena.mark() == mark);
+}
+
+fn void backed_arena_failed_overflow_resize_preserves_old_block() @test
+{
+	char[8] initial_storage;
+	Allocator backing = &std::core::mem::allocators::NULL_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	void*? failed = arena.acquire(80, alloc::AllocInitType.NO_ZERO);
+	if (catch failed)
+	{
+		assert(arena.mark() == 0);
+		assert(arena.pages == null);
+		return;
+	}
+	assert(false, "Expected overflow allocation to fail with a null backing allocator.");
 }

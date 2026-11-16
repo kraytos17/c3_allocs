@@ -7,8 +7,7 @@ const BACKED_ARENA_HEADER_MAGIC @local = 0xBAA2E_A11C0C;
 
 <*
  A growable arena that starts in a caller-owned buffer and obtains overflow
- blocks from a backing allocator. Each overflow request reserves one backing
- block that contains both its descriptor and payload.
+ payloads and descriptors from a backing allocator.
 
  The initial buffer is borrowed. Overflow allocations are owned by this arena
  and released by reset/clear or free. The arena and its backing allocator are
@@ -39,7 +38,7 @@ struct BackedArenaHeader @local
 struct BackedArenaPage @local
 {
 	BackedArenaPage* next;
-	void* backing_block;
+	void* descriptor_block;
 	void* payload;
 	sz requested_size;
 	sz sequence;
@@ -103,6 +102,7 @@ fn void BackedArenaAllocator.reset(&self, sz mark)
 		header.magic = 0;
 	}
 
+	backed_arena_rewind_freed_initial(self);
 	BackedArenaPage** current = &self.pages;
 	while (*current)
 	{
@@ -110,7 +110,7 @@ fn void BackedArenaAllocator.reset(&self, sz mark)
 		if (page.sequence > mark)
 		{
 			*current = page.next;
-			backed_arena_free_page(self, page);
+			backed_arena_free_page(self.backing_allocator, page);
 		}
 		else
 		{
@@ -238,8 +238,8 @@ fn void*? backed_arena_acquire_initial(
 <*
  Allocate a dedicated overflow block through the backing allocator.
 
- The page descriptor and payload share one backing allocation. The descriptor
- is linked into the arena only after backing allocation succeeds.
+ The descriptor and payload share one backing allocation. The descriptor is
+ initialized and linked into the arena only after allocation succeeds.
 
  @param [&inout] self : "The arena that owns the new overflow page"
  @param size : "The requested payload size"
@@ -263,15 +263,15 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	void* block = block_opt;
 	BackedArenaPage* page = block;
 	void* payload = (char*)block + payload_offset;
+	sz sequence = self.next_sequence;
+	self.next_sequence++;
 	page.next = self.pages;
-	page.backing_block = block;
+	page.descriptor_block = block;
 	page.payload = payload;
 	page.requested_size = size;
-	page.sequence = self.next_sequence;
+	page.sequence = sequence;
 	page.allocation_alignment = alignment;
 	self.pages = page;
-	self.next_sequence++;
-	if (init_type == ZERO) mem::clear(payload, size, mem::DEFAULT_MEM_ALIGNMENT);
 	return payload;
 }
 
@@ -343,7 +343,7 @@ fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	page_link = backed_arena_find_page_link(self, old_pointer);
 	assert(page_link, "Resized page disappeared from the arena page list.");
 	*page_link = old_page.next;
-	backed_arena_free_page(self, old_page);
+	backed_arena_free_page(self.backing_allocator, old_page);
 	return replacement;
 }
 
@@ -377,7 +377,7 @@ fn void BackedArenaAllocator.release(&self, void* old_pointer, bool aligned) @dy
 
 	BackedArenaPage* page = *page_link;
 	*page_link = page.next;
-	backed_arena_free_page(self, page);
+	backed_arena_free_page(self.backing_allocator, page);
 }
 
 <*
@@ -386,14 +386,14 @@ fn void BackedArenaAllocator.release(&self, void* old_pointer, bool aligned) @dy
  Save the backing addresses and alignment before releasing either allocation,
  because the descriptor itself may be stored in the returned memory.
 
- @param [&inout] self : "The arena owning the page"
+ @param backing_allocator : "The allocator that owns the page's backing blocks"
  @param [drop] page : "The page descriptor and payload to release"
 *>
-fn void backed_arena_free_page(BackedArenaAllocator* self, BackedArenaPage* page) @local
+fn void backed_arena_free_page(Allocator backing_allocator, BackedArenaPage* page) @local
 {
-	void* descriptor = page.backing_block;
+	void* allocation = page.descriptor_block;
 	sz allocation_alignment = page.allocation_alignment;
-	self.backing_allocator.release(descriptor, BackedArenaPage::alignment > mem::DEFAULT_MEM_ALIGNMENT);
+	backing_allocator.release(allocation, allocation_alignment > mem::DEFAULT_MEM_ALIGNMENT);
 }
 
 <*
