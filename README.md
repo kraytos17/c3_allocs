@@ -5,13 +5,16 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains two allocators:
+The repository currently contains three allocators:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
   last-allocation release, and mark/reset bulk reclamation.
 - **`PoolAllocator`** — a fixed-capacity pool that divides caller-provided
   storage into equal-sized slots and reuses individual slots after release.
+- **`BackedArenaAllocator`** — an arena that starts in a caller-provided buffer
+  and obtains individual overflow blocks from a backing allocator. It supports
+  marks and frees overflow blocks when resetting to an earlier mark.
 
 ## Requirements
 
@@ -156,13 +159,59 @@ alloc::free(&pool, item); // The released slot can be reused.
 - The pool is not thread-safe and does not run destructors for values stored
   in its memory.
 
+## Using `BackedArenaAllocator`
+
+`BackedArenaAllocator` is for workloads that mostly fit in a fast initial buffer
+but occasionally need more memory. The initial buffer is borrowed. Overflow
+allocations are acquired from the supplied backing allocator and are owned by
+the backed arena until individually released or invalidated by reset/clear.
+
+```c3
+import std::core::mem::alloc;
+import c3_allocs::allocators;
+
+char[1024] initial_storage;
+allocators::ArenaAllocator backing;
+char[8192] backing_storage;
+backing.init(backing_storage[..]);
+
+allocators::BackedArenaAllocator arena;
+arena.init(initial_storage[..], &backing);
+
+sz mark = arena.mark();
+char* data = alloc::malloc(&arena, 2048); // Uses backing storage if needed.
+// Use data before resetting to mark.
+arena.reset(mark); // Frees overflow allocations made after the mark.
+arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
+```
+
+### Backed arena behavior and constraints
+
+- The initial buffer and the backing allocator must both outlive the arena and
+  any allocations that remain in use.
+- Each overflow request is a separate backing allocation; this allocator does
+  not grow and subdivide overflow chunks. The backing allocator must be able to
+  allocate the page metadata plus payload as one block.
+- `mark`/`reset` invalidate allocations made after the mark. Reset releases
+  overflow blocks created after it and rewinds the initial buffer to the saved
+  position. `clear` resets to the beginning; `free` also detaches the arena
+  from its borrowed initial buffer and backing allocator, so it must be
+  reinitialized before further use.
+- `release` frees overflow blocks immediately. For allocations inside the
+  initial buffer, only a last-in-first-out release sequence reclaims space.
+- `resize` preserves the common prefix. It may resize the newest initial-buffer
+  allocation in place; otherwise it acquires a replacement before releasing
+  the old allocation. On failure, it leaves the original allocation valid.
+- The arena is not thread-safe. Reset/free do not run destructors.
+
 ## Repository layout
 
 - `src/allocators/arena.c3` — the arena implementation.
 - `src/allocators/pool.c3` — the fixed-slot pool implementation.
+- `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.
 - `src/main.c3` — executable entry point.
-- `test/arena_test.c3` and `test/pool_test.c3` — allocator behavior and
-  failure-path tests.
+- `test/arena_test.c3`, `test/pool_test.c3`, and `test/backed_arena_test.c3` —
+  allocator behavior and failure-path tests.
 - `project.json` — C3 compiler project configuration.
 - `Makefile` — build, test, formatting, and clean targets.
 - `.c3fmt` — formatter configuration for `c3fmt`.
