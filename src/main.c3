@@ -64,6 +64,7 @@ fn int main(String[] args)
 	char[][2] class_bufs = { class_small[..], class_large[..] };
 	sz[2] class_sizes = { 32, 256 };
 	allocators::SizeClassAllocator classes;
+
 	classes.init(class_bufs[..], class_sizes[..]);
 	void* small = alloc::malloc(&classes, 24);
 	io::printf("sizeclass: capacity=%d available=%d\n", classes.capacity(), classes.available());
@@ -73,8 +74,14 @@ fn int main(String[] args)
 	allocators::ScratchAllocator scratch;
 	scratch.init(scratch_storage[..]);
 	void* tmp = alloc::malloc(&scratch, 64);
-	(void)tmp;
 	io::printf("scratch: reserved=%d peak=%d\n", scratch.bytes_reserved(), scratch.peak());
 	scratch.clear();
+
+	char[2048] buddy_storage;
+	allocators::BuddyAllocator buddy;
+	buddy.init(buddy_storage[..]);
+	void* buddy_item = alloc::malloc(&buddy, 48);
+	io::printf("buddy: capacity=%d free=%d\n", buddy.capacity(), buddy.bytes_free());
+	alloc::free(&buddy, buddy_item);
 	return 0;
 }

@@ -86,3 +86,24 @@ fn void common_split_size_avoids_splinters() @test
 	assert(allocators::allocator_split_size(90, 8, 100, 16) == 100);
 	assert(allocators::allocator_split_size(200, 8, 100, 16) == 100);
 }
+
+fn void common_pow2_helpers_round_correctly() @test
+{
+	assert(allocators::allocator_ceil_pow2(0) == 0);
+	assert(allocators::allocator_ceil_pow2(-5) == 0);
+	assert(allocators::allocator_ceil_pow2(1) == 1);
+	assert(allocators::allocator_ceil_pow2(2) == 2);
+	assert(allocators::allocator_ceil_pow2(3) == 4);
+	assert(allocators::allocator_ceil_pow2(64) == 64);
+	assert(allocators::allocator_ceil_pow2(65) == 128);
+	assert(allocators::allocator_floor_pow2(0) == 0);
+	assert(allocators::allocator_floor_pow2(1) == 1);
+	assert(allocators::allocator_floor_pow2(3) == 2);
+	assert(allocators::allocator_floor_pow2(64) == 64);
+	assert(allocators::allocator_floor_pow2(100) == 64);
+	assert(allocators::allocator_is_pow2(1));
+	assert(allocators::allocator_is_pow2(64));
+	assert(!allocators::allocator_is_pow2(0));
+	assert(!allocators::allocator_is_pow2(100));
+	assert(!allocators::allocator_is_pow2(-8));
+}

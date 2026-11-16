@@ -5,7 +5,7 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains six allocators:
+The repository currently contains seven allocators:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
@@ -24,6 +24,10 @@ The repository currently contains six allocators:
   keeping pool O(1) release and stable pointers.
 - **`ScratchAllocator`** — a single-frame allocator wrapping an arena with
   a high-water mark for tuning frame buffer sizes.
+- **`BuddyAllocator`** — a binary buddy allocator over caller-owned memory.
+  It carves the largest aligned power-of-two region from the buffer, splits
+  blocks on demand, and merges a freed block with its free buddy (found by
+  address XOR), so full release restores one contiguous block.
 
 ## Requirements
 
@@ -319,6 +323,36 @@ scratch.clear(); // One O(1) bulk reset for the next frame.
 - `mark`/`reset`/`release`/`resize` match arena semantics; `clear()` keeps
   the peak so tuning survives across frames.
 
+## Using `BuddyAllocator`
+
+`BuddyAllocator` manages variable-size blocks with minimal external
+fragmentation. Orders double from 64 bytes; each request rounds up to the
+smallest order covering header, padding, and payload. Splits publish the
+right-hand buddy and descend left; release merges upward while the XOR
+buddy is free.
+
+```c3
+char[4096] storage;
+allocators::BuddyAllocator buddy;
+buddy.init(storage[..]);
+
+void* item = alloc::malloc(&buddy, 48);
+alloc::free(&buddy, item); // Merges with its free buddy when possible.
+```
+
+### Buddy behavior and constraints
+
+- The buffer is borrowed. Only the carved power-of-two region is managed;
+  leading and trailing bytes stay reserved but unused. `capacity()`
+  reports the region size, not the buffer length.
+- Requests larger than the region report `INVALID_ALLOC_SIZE`; exhaustion
+  reports `OUT_OF_MEMORY`. Failure leaves state unchanged.
+- `largest_free()` and `free_block_count()` mirror the free-list queries:
+  a request larger than `largest_free` fails even when `bytes_free` is
+  bigger. `clear()` restores one block.
+- `resize` shrinks in place and otherwise moves with prefix preservation.
+- The allocator is not thread-safe and does not run destructors.
+
 ### Shared core and typed helpers
 
 - `src/allocators/common.c3` holds the shared alignment, padding,
@@ -336,11 +370,13 @@ scratch.clear(); // One O(1) bulk reset for the next frame.
 - `src/allocators/pool.c3` — the fixed-slot pool implementation.
 - `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.
 - `src/allocators/freelist.c3` — the variable-size free-list implementation.
+- `src/allocators/buddy.c3` — the binary buddy allocator.
 - `src/allocators/sizeclass.c3` — the size-class dispatcher over pools.
 - `src/allocators/scratch.c3` — the single-frame scratch allocator.
 - `src/main.c3` — executable entry point.
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
-  `test/freelist_test.c3`, `test/sizeclass_test.c3`,
+  `test/freelist_test.c3`, `test/buddy_test.c3`,
+  `test/sizeclass_test.c3`,
   `test/scratch_test.c3`, and `test/common_test.c3` — allocator behavior
   and failure-path tests.
 - `project.json` — C3 compiler project configuration.

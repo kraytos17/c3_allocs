@@ -102,6 +102,60 @@ fn bool allocator_checked_add(sz a, sz b, sz* out)
 }
 
 <*
+ Return the smallest power of two at or above `value`.
+
+ Values at or below zero yield zero. Values whose ceiling exceeds the
+ maximum signed size yield zero to signal overflow.
+
+ @param value : "The byte count to round up"
+ @return "The ceiling power of two, or zero for invalid or overflowing input"
+*>
+fn sz allocator_ceil_pow2(sz value)
+{
+	if (value <= 1) return value <= 0 ? 0 : 1;
+
+	uptr v = (uptr)value - 1;
+	if (v >= (uptr)1 << 63) return 0;
+
+	v |= v >> 1;
+	v |= v >> 2;
+	v |= v >> 4;
+	v |= v >> 8;
+	v |= v >> 16;
+	v |= v >> 32;
+	v++;
+	return (sz)v;
+}
+
+<*
+ Return the largest power of two at or below `value`.
+
+ @param value : "The byte count to round down"
+ @return "The floor power of two, or zero for non-positive input"
+*>
+fn sz allocator_floor_pow2(sz value)
+{
+	if (value <= 0) return 0;
+
+	uptr v = (uptr)value;
+	v |= v >> 1;
+	v |= v >> 2;
+	v |= v >> 4;
+	v |= v >> 8;
+	v |= v >> 16;
+	v |= v >> 32;
+	return (sz)(v - (v >> 1));
+}
+
+<*
+ Check whether a value is a positive power of two.
+
+ @param value : "The value to test"
+ @return "True when the value is a positive power of two"
+*>
+fn bool allocator_is_pow2(sz value) => value > 0 && ((uptr)value & ((uptr)value - 1)) == 0;
+
+<*
  Check whether a `[address, address + size)` range lies in a borrowed buffer.
 
  @param base : "The start of the borrowed buffer"
