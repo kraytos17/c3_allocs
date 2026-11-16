@@ -73,3 +73,89 @@ fn uptr allocator_align_up_address(
  @return "The smallest multiple of `alignment` at or above `value`"
 *>
 fn sz allocator_align_up_size(sz value, sz alignment) @private => mem::aligned_offset(value, alignment);
+
+<*
+ Error contract shared by every allocator in this module.
+
+ Invalid sizes (zero or negative), invalid alignments, and sizes that
+ overflow layout arithmetic report `INVALID_ALLOC_SIZE`. Exhaustion of the
+ borrowed buffer or failure of a backing allocator reports `OUT_OF_MEMORY`.
+ A failed `acquire` or `resize` leaves the allocator state unchanged and
+ preserves the original block.
+
+ @param size : "Unused, this documents the module-wide contract"
+*>
+fn void allocator_error_contract(sz size) @private => (void)size;
+
+<*
+ Check whether a `[address, address + size)` range lies in a borrowed buffer.
+
+ @param base : "The start of the borrowed buffer"
+ @param len : "The length of the borrowed buffer"
+ @param address : "The candidate range start"
+ @param size : "The candidate range byte count, must not be negative"
+ @return "True when the whole range is inside the buffer"
+*>
+fn bool allocator_contains(uptr base, sz len, uptr address, sz size) @private
+{
+	if (size < 0) return false;
+	if (len < 0) return false;
+	if (address < base) return false;
+
+	uptr offset = address - base;
+	if (offset > (uptr)len) return false;
+	if (size > len - (sz)offset) return false;
+	return true;
+}
+
+<*
+ Zero a payload when the caller requested zero initialization.
+
+ @param payload : "The payload to conditionally clear"
+ @param size : "The requested payload byte count"
+ @param init_type : "Whether the payload must be zero-initialized"
+*>
+fn void allocator_zero_if(void* payload, sz size, AllocInitType init_type) @private
+{
+	if (init_type == ZERO) mem::clear(payload, size, mem::DEFAULT_MEM_ALIGNMENT);
+}
+
+<*
+ Compute the payload address for a block starting at `block_start`.
+
+ The payload follows a header of `header_size` bytes and meets
+ `effective_alignment`. The caller must have validated sizes so that
+ `block_start + header_size` cannot overflow.
+
+ @param block_start : "The start of the whole block"
+ @param header_size : "The header byte count at the start of the block"
+ @param effective_alignment : "The validated payload alignment"
+ @return "The aligned payload address"
+*>
+fn uptr allocator_payload_address(
+	uptr block_start,
+	sz header_size,
+	sz effective_alignment
+) @private => allocator_align_up_address(block_start + (uptr)header_size, effective_alignment);
+
+
+<*
+ Decide the allocated size for a free range, splitting only when useful.
+
+ The total is rounded up to `split_alignment` so later ranges stay aligned.
+ The remainder becomes a new free range only when it can hold at least
+ `min_remainder` bytes; otherwise the whole free range is consumed, which
+ avoids unusable splinters.
+
+ @param total_needed : "The bytes needed including header, padding, and payload"
+ @param split_alignment : "The alignment the remainder start must keep"
+ @param free_size : "The available free range byte count"
+ @param min_remainder : "The smallest useful remainder range"
+ @return "The bytes to allocate from the front of the free range"
+*>
+fn sz allocator_split_size(sz total_needed, sz split_alignment, sz free_size, sz min_remainder) @private
+{
+	sz alloc_size = allocator_align_up_size(total_needed, split_alignment);
+	if (alloc_size <= free_size && free_size - alloc_size >= min_remainder) return alloc_size;
+	return free_size;
+}

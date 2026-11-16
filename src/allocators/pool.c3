@@ -147,7 +147,7 @@ fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alig
 	slot.requested_size = size;
 	slot.in_use = true;
 	void* result = (char*)slot + self.payload_offset;
-	if (init_type == ZERO) mem::clear(result, size, mem::DEFAULT_MEM_ALIGNMENT);
+	allocator_zero_if(result, size, init_type);
 	return result;
 }
 

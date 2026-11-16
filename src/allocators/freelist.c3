@@ -119,6 +119,51 @@ fn sz FreeListAllocator.bytes_free(&self) => self.free_bytes;
 fn sz FreeListAllocator.bytes_used(&self) => self.data.len - self.free_bytes;
 
 <*
+ Return the number of disjoint free ranges currently managed.
+
+ A freshly cleared allocator has one range. Each split increases the count
+ and each coalescing release decreases it. Comparing this with
+ `largest_free` shows whether free bytes are contiguous enough for a large
+ request.
+
+ @param [&in] self : "The allocator to query"
+ @return "The free range count"
+*>
+fn sz FreeListAllocator.free_block_count(&self)
+{
+	sz count = 0;
+	FreeListFreeBlock* block = self.free_head;
+	while (block)
+	{
+		count++;
+		block = block.next;
+	}
+	return count;
+}
+
+<*
+ Return the largest single contiguous free range in bytes.
+
+ Allocations larger than this fail even when `bytes_free` is bigger,
+ because first-fit selection cannot span ranges. After freeing everything,
+ this equals `bytes_free`.
+
+ @param [&in] self : "The allocator to query"
+ @return "The largest free range byte count, or zero when full"
+*>
+fn sz FreeListAllocator.largest_free(&self)
+{
+	sz largest = 0;
+	FreeListFreeBlock* block = self.free_head;
+	while (block)
+	{
+		if (block.size > largest) largest = block.size;
+		block = block.next;
+	}
+	return largest;
+}
+
+<*
  Discard all allocations and restore one contiguous free range.
 
  The borrowed buffer is retained. Pointers returned before the call must
@@ -179,8 +224,7 @@ fn FreeListUsedHeader* freelist_used_header(FreeListAllocator* self, void* point
 	if (header_addr < base_addr + (uptr)header.block_offset) return null;
 
 	uptr block_start = header_addr - (uptr)header.block_offset;
-	if (block_start < base_addr) return null;
-	if (block_start + (uptr)header.block_size > base_addr + (uptr)self.data.len) return null;
+	if (!allocator_contains(base_addr, self.data.len, block_start, header.block_size)) return null;
 	if (header.requested_size > header.block_size) return null;
 	return header;
 }
@@ -275,17 +319,14 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 						sz total_needed = (sz)payload_offset + size;
 						if (free_size >= total_needed)
 						{
-							sz alloc_size = allocator_align_up_size(total_needed, FreeListFreeBlock::alignment);
-							bool split = false;
-							if (alloc_size <= free_size && free_size - alloc_size >= FreeListFreeBlock::size)
-							{
-								split = true;
-							}
-							else
-							{
-								alloc_size = free_size;
-							}
+							sz alloc_size = allocator_split_size(
+								total_needed,
+								FreeListFreeBlock::alignment,
+								free_size,
+								FreeListFreeBlock::size
+							);
 
+							bool split = alloc_size != free_size;
 							uptr header_addr = payload_addr - (uptr)FreeListUsedHeader::size;
 							FreeListUsedHeader* header = (FreeListUsedHeader*)header_addr;
 							header.magic = FREE_LIST_BLOCK_MAGIC;
@@ -309,7 +350,8 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 								*link = free_next;
 								self.free_bytes -= free_size;
 							}
-							if (init_type == ZERO) mem::clear(result, size, mem::DEFAULT_MEM_ALIGNMENT);
+
+							allocator_zero_if(result, size, init_type);
 							return result;
 						}
 					}
@@ -364,8 +406,13 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 		if (new_size <= max_fit)
 		{
 			sz total_needed = (sz)payload_offset + new_size;
-			sz alloc_size = allocator_align_up_size(total_needed, FreeListFreeBlock::alignment);
-			if (alloc_size <= block_size && block_size - alloc_size >= FreeListFreeBlock::size)
+			sz alloc_size = allocator_split_size(
+				total_needed,
+				FreeListFreeBlock::alignment,
+				block_size,
+				FreeListFreeBlock::size
+			);
+			if (alloc_size != block_size)
 			{
 				void* tail = (void*)(block_start + (uptr)alloc_size);
 				sz tail_size = block_size - alloc_size;
@@ -394,13 +441,17 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 					&& combined - (sz)payload_offset >= new_size)
 				{
 					sz total_needed = (sz)payload_offset + new_size;
-					sz alloc_size = allocator_align_up_size(total_needed, FreeListFreeBlock::alignment);
-					if (alloc_size > combined) break;
+					sz alloc_size = allocator_split_size(
+						total_needed,
+						FreeListFreeBlock::alignment,
+						combined,
+						FreeListFreeBlock::size
+					);
 
 					FreeListFreeBlock* next = free.next;
 					*link = next;
 					self.free_bytes -= free.size;
-					if (combined - alloc_size >= FreeListFreeBlock::size)
+					if (alloc_size != combined)
 					{
 						void* tail = (void*)(block_start + (uptr)alloc_size);
 						sz tail_size = combined - alloc_size;

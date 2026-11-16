@@ -237,6 +237,8 @@ list.clear(); // Discards all allocations at once.
 - The buffer is borrowed; it must outlive the allocator and its allocations.
 - `capacity()` reports the borrowed length, `bytes_free()` reports free
   ranges, and `bytes_used()` reports borrowed bytes not currently free.
+  `largest_free()` reports the biggest contiguous range and
+  `free_block_count()` reports how many ranges exist.
 - `acquire` aligns payloads, supports `ZERO` init, and leaves state unchanged
   on failure. A range is split only when the remainder can hold a free node.
 - `release` ignores null, foreign, interior, and duplicate releases, then

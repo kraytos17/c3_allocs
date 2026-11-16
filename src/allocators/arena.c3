@@ -120,15 +120,16 @@ fn void*? ArenaAllocator.acquire(&self, sz size, AllocInitType init_type, sz ali
 	alignment = allocator_effective_alignment(alignment);
 	if (self.used > self.data.len - ArenaHeader::size) return mem::OUT_OF_MEMORY~;
 
-	sz after_header = self.used + ArenaHeader::size;
 	uptr base_addr = (uptr)self.data.ptr;
-	if (base_addr > uptr::max - (uptr)after_header) return mem::OUT_OF_MEMORY~;
+	uptr block_start_addr = base_addr + (uptr)self.used;
+	if (block_start_addr < base_addr) return mem::OUT_OF_MEMORY~;
+	if (block_start_addr > uptr::max - (uptr)ArenaHeader::size) return mem::OUT_OF_MEMORY~;
 
-	uptr unaligned_addr = base_addr + (uptr)after_header;
-	uptr uptr_alignment = (uptr)alignment;
-	if (unaligned_addr > uptr::max - (uptr_alignment - 1)) return mem::OUT_OF_MEMORY~;
+	uptr unaligned_addr = block_start_addr + (uptr)ArenaHeader::size;
+	if (unaligned_addr < block_start_addr) return mem::OUT_OF_MEMORY~;
+	if (unaligned_addr > uptr::max - ((uptr)alignment - 1)) return mem::OUT_OF_MEMORY~;
 
-	uptr aligned_addr = (unaligned_addr + uptr_alignment - 1) & ~(uptr_alignment - 1);
+	uptr aligned_addr = allocator_payload_address(block_start_addr, ArenaHeader::size, alignment);
 	if (aligned_addr < base_addr) return mem::OUT_OF_MEMORY~;
 
 	sz result_offset = (sz)(aligned_addr - base_addr);
@@ -142,7 +143,7 @@ fn void*? ArenaAllocator.acquire(&self, sz size, AllocInitType init_type, sz ali
 	header.previous_used = previous_used;
 	header.size = size;
 	self.used = result_offset + size;
-	if (init_type == ZERO) mem::clear(result, size, mem::DEFAULT_MEM_ALIGNMENT);
+	allocator_zero_if(result, size, init_type);
 	return result;
 }
 

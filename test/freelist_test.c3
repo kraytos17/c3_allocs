@@ -284,3 +284,24 @@ fn void freelist_works_with_standard_allocation_helpers() @test
 	for (sz i = 0; i < 48; i++) assert(grown[i] == (char)i);
 	alloc::free(&list, grown);
 }
+
+fn void freelist_fragmentation_queries_track_ranges() @test
+{
+	char[512] storage;
+	allocators::FreeListAllocator list;
+	list.init(storage[..]);
+	assert(list.free_block_count() == 1);
+	assert(list.largest_free() == list.bytes_free());
+
+	void* a = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* b = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* c = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	list.release(a, false);
+	list.release(c, false);
+	assert(list.free_block_count() == 2);
+	assert(list.largest_free() < list.bytes_free());
+	assert(list.largest_free() > 0);
+	list.release(b, false);
+	assert(list.free_block_count() == 1);
+	assert(list.largest_free() == list.bytes_free());
+}

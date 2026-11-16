@@ -264,15 +264,16 @@ fn void*? backed_arena_acquire_initial(
 	}
 	if (self.initial_used > self.initial_data.len - BackedArenaHeader::size) return mem::OUT_OF_MEMORY~;
 
-	sz after_header = self.initial_used + BackedArenaHeader::size;
 	uptr base_addr = (uptr)self.initial_data.ptr;
-	if (base_addr > uptr::max - (uptr)after_header) return mem::OUT_OF_MEMORY~;
+	uptr block_start_addr = base_addr + (uptr)self.initial_used;
+	if (block_start_addr < base_addr) return mem::OUT_OF_MEMORY~;
+	if (block_start_addr > uptr::max - (uptr)BackedArenaHeader::size) return mem::OUT_OF_MEMORY~;
 
-	uptr unaligned_addr = base_addr + (uptr)after_header;
-	uptr uptr_alignment = (uptr)alignment;
-	if (unaligned_addr > uptr::max - (uptr_alignment - 1)) return mem::OUT_OF_MEMORY~;
+	uptr unaligned_addr = block_start_addr + (uptr)BackedArenaHeader::size;
+	if (unaligned_addr < block_start_addr) return mem::OUT_OF_MEMORY~;
+	if (unaligned_addr > uptr::max - ((uptr)alignment - 1)) return mem::OUT_OF_MEMORY~;
 
-	uptr payload_addr = (unaligned_addr + uptr_alignment - 1) & ~(uptr_alignment - 1);
+	uptr payload_addr = allocator_payload_address(block_start_addr, BackedArenaHeader::size, alignment);
 	if (payload_addr < base_addr) return mem::OUT_OF_MEMORY~;
 
 	sz payload_offset = (sz)(payload_addr - base_addr);
@@ -292,7 +293,7 @@ fn void*? backed_arena_acquire_initial(
 	header.in_use = true;
 	self.last_initial_header = header;
 	self.initial_used = payload_offset + size;
-	if (init_type == ZERO) mem::clear(header.payload, size, mem::DEFAULT_MEM_ALIGNMENT);
+	allocator_zero_if(header.payload, size, init_type);
 	return header.payload;
 }
 
