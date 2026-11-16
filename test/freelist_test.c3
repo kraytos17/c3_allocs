@@ -76,6 +76,27 @@ fn void freelist_full_coalescing_restores_single_range() @test
 	assert(list.bytes_free() == initial_free);
 }
 
+fn void freelist_middle_release_merges_both_neighbours() @test
+{
+	char[512] storage;
+	allocators::FreeListAllocator list;
+	list.init(storage[..]);
+	sz initial_free = list.bytes_free();
+
+	void* a = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* b = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* c = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	list.release(a, false);
+	list.release(c, false);
+	assert(list.bytes_free() < initial_free);
+	list.release(b, false);
+	assert(list.bytes_free() == initial_free);
+	void* big = list.acquire(96, alloc::AllocInitType.NO_ZERO)!!;
+	assert(big != null);
+	list.release(big, false);
+	assert(list.bytes_free() == initial_free);
+}
+
 fn void freelist_rejects_invalid_requests_without_state_change() @test
 {
 	char[256] storage;
