@@ -226,11 +226,10 @@ fn void BackedArenaAllocator.free(&self)
 fn void*? BackedArenaAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
 	if (size <= 0) return mem::INVALID_ALLOC_SIZE~;
-	if (!backed_arena_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if (self.next_sequence == sz::max) return mem::INVALID_ALLOC_SIZE~;
 
-	sz effective_alignment = allocators::alignment_for_allocation(alignment);
-	if (effective_alignment < BackedArenaHeader::alignment) effective_alignment = BackedArenaHeader::alignment;
+	sz effective_alignment = allocator_effective_alignment_min(alignment, BackedArenaHeader::alignment);
 
 	void*? initial = backed_arena_acquire_initial(self, size, init_type, effective_alignment);
 	if (catch initial)
@@ -315,7 +314,7 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	if (alignment < BackedArenaPage::alignment) alignment = BackedArenaPage::alignment;
 	if (alignment > sz::max - BackedArenaPage::size) return mem::INVALID_ALLOC_SIZE~;
 
-	sz payload_offset = mem::aligned_offset(BackedArenaPage::size, alignment);
+	sz payload_offset = allocator_align_up_size(BackedArenaPage::size, alignment);
 	if (size > sz::max - payload_offset) return mem::INVALID_ALLOC_SIZE~;
 
 	sz total_size = payload_offset + size;
@@ -356,9 +355,9 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
 	if (!old_pointer || new_size <= 0) return mem::INVALID_ALLOC_SIZE~;
-	if (!backed_arena_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 
-	sz effective_alignment = allocators::alignment_for_allocation(alignment);
+	sz effective_alignment = allocator_effective_alignment(alignment);
 	BackedArenaHeader* initial_header = backed_arena_initial_header(self, old_pointer);
 	if (initial_header)
 	{
@@ -522,11 +521,3 @@ fn void backed_arena_rewind_freed_initial(BackedArenaAllocator* self) @local
 		backed_arena_pop_initial(self, self.last_initial_header);
 	}
 }
-
-<*
- Check whether an optional allocation alignment is valid.
-
- @param alignment : "The requested alignment, or zero for default"
- @return "True when the alignment is supported by C3's memory API"
-*>
-fn bool backed_arena_valid_alignment(sz alignment) @local => !alignment || mem::is_valid_alignment(alignment);

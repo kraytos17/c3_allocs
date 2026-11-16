@@ -151,14 +151,6 @@ fn void FreeListAllocator.clear(&self)
 }
 
 <*
- Check whether an optional allocation alignment is valid.
-
- @param alignment : "The requested alignment, or zero for the default"
- @return "True when the alignment is zero or a valid C3 alignment"
-*>
-fn bool freelist_valid_alignment(sz alignment) @local => !alignment || mem::is_valid_alignment(alignment);
-
-<*
  Validate a payload pointer and return its allocation header.
 
  @param [&in] self : "The allocator that may own the pointer"
@@ -252,10 +244,10 @@ fn void freelist_insert_coalesce(FreeListAllocator* self, void* start, sz size) 
 fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
 	if (size <= 0) return mem::INVALID_ALLOC_SIZE~;
-	if (!freelist_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if (!self.free_head || !self.data.ptr) return mem::OUT_OF_MEMORY~;
 
-	sz effective = allocators::alignment_for_allocation(alignment);
+	sz effective = allocator_effective_alignment(alignment);
 	if (effective < FreeListFreeBlock::alignment) effective = FreeListFreeBlock::alignment;
 	if (effective < FreeListUsedHeader::alignment) effective = FreeListUsedHeader::alignment;
 	if (size > sz::max - FreeListUsedHeader::size - effective) return mem::INVALID_ALLOC_SIZE~;
@@ -283,7 +275,7 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 						sz total_needed = (sz)payload_offset + size;
 						if (free_size >= total_needed)
 						{
-							sz alloc_size = mem::aligned_offset(total_needed, FreeListFreeBlock::alignment);
+							sz alloc_size = allocator_align_up_size(total_needed, FreeListFreeBlock::alignment);
 							bool split = false;
 							if (alloc_size <= free_size && free_size - alloc_size >= FreeListFreeBlock::size)
 							{
@@ -350,12 +342,12 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
 	if (!old_pointer || new_size <= 0) return mem::INVALID_ALLOC_SIZE~;
-	if (!freelist_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 
 	FreeListUsedHeader* header = freelist_used_header(self, old_pointer);
 	if (!header) return mem::INVALID_ALLOC_SIZE~;
 
-	sz effective = allocators::alignment_for_allocation(alignment);
+	sz effective = allocator_effective_alignment(alignment);
 	if (effective < FreeListFreeBlock::alignment) effective = FreeListFreeBlock::alignment;
 
 	uptr old_addr = (uptr)old_pointer;
@@ -372,7 +364,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 		if (new_size <= max_fit)
 		{
 			sz total_needed = (sz)payload_offset + new_size;
-			sz alloc_size = mem::aligned_offset(total_needed, FreeListFreeBlock::alignment);
+			sz alloc_size = allocator_align_up_size(total_needed, FreeListFreeBlock::alignment);
 			if (alloc_size <= block_size && block_size - alloc_size >= FreeListFreeBlock::size)
 			{
 				void* tail = (void*)(block_start + (uptr)alloc_size);
@@ -402,7 +394,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 					&& combined - (sz)payload_offset >= new_size)
 				{
 					sz total_needed = (sz)payload_offset + new_size;
-					sz alloc_size = mem::aligned_offset(total_needed, FreeListFreeBlock::alignment);
+					sz alloc_size = allocator_align_up_size(total_needed, FreeListFreeBlock::alignment);
 					if (alloc_size > combined) break;
 
 					FreeListFreeBlock* next = free.next;

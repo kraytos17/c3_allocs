@@ -49,22 +49,19 @@ struct PoolSlot @local
 fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz alignment = 0)
 {
 	assert(block_size > 0, "Pool block size must be positive.");
-	assert(!alignment || mem::is_valid_alignment(alignment), "Pool alignment must be valid.");
-
-	if (alignment < mem::DEFAULT_MEM_ALIGNMENT) alignment = mem::DEFAULT_MEM_ALIGNMENT;
-	if (alignment < PoolSlot::alignment) alignment = PoolSlot::alignment;
-
+	assert(allocator_valid_alignment(alignment), "Pool alignment must be valid.");
+	alignment = allocator_effective_alignment_min(alignment, PoolSlot::alignment);
 	assert(mem::is_valid_alignment(alignment), "Effective pool alignment must be valid.");
-	sz payload_offset = mem::aligned_offset(PoolSlot::size, alignment);
+
+	sz payload_offset = allocator_align_up_size(PoolSlot::size, alignment);
 	assert(block_size <= sz::max - payload_offset, "Pool block size overflows slot size.");
 	sz slot_size = payload_offset + block_size;
 	assert(slot_size <= sz::max - (alignment - 1), "Pool slot stride overflows.");
-	sz slot_stride = mem::aligned_offset(slot_size, alignment);
+	sz slot_stride = allocator_align_up_size(slot_size, alignment);
 
 	uptr base_addr = (uptr)storage.ptr;
-	uptr uptr_alignment = (uptr)alignment;
-	assert(base_addr <= uptr::max - (uptr_alignment - 1), "Pool buffer address overflows.");
-	uptr aligned_addr = (base_addr + uptr_alignment - 1) & ~(uptr_alignment - 1);
+	uptr aligned_addr = allocator_align_up_address(base_addr, alignment);
+	assert(base_addr <= uptr::max - ((uptr)alignment - 1), "Pool buffer address overflows.");
 	sz first_slot_offset = (sz)(aligned_addr - base_addr);
 	sz capacity = first_slot_offset <= storage.len ? (storage.len - first_slot_offset) / slot_stride : 0;
 
@@ -91,6 +88,22 @@ fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz al
 }
 
 <*
+ Initialize the pool with slots sized for a specific type.
+
+ The payload size and alignment are derived from the type, so callers avoid
+ passing raw sizes. The buffer layout and slot reuse rules are identical to
+ `PoolAllocator.init`.
+
+ @param self : "The pool to initialize"
+ @param storage : "The caller-owned buffer for the pool slots"
+ @return "A pointer to the initialized pool"
+*>
+fn PoolAllocator* pool_init_for(
+	PoolAllocator* self,
+	char[] storage
+)<Type> => self.init(storage, Type::size, Type::alignment);
+
+<*
  Return the number of fixed-size slots available in the pool.
 
  @param [&in] self : "The pool to inspect"
@@ -104,10 +117,7 @@ fn sz PoolAllocator.capacity(&self) => self.slot_count;
  @param [&in] self : "The pool to inspect"
  @return "The number of unused slots"
 *>
-fn sz PoolAllocator.available(&self)
-{
-	return self.free_count;
-}
+fn sz PoolAllocator.available(&self) => self.free_count;
 
 <*
  Acquire one slot from the pool.
@@ -126,7 +136,7 @@ fn sz PoolAllocator.available(&self)
 fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
 	if (size <= 0 || size > self.block_size) return mem::INVALID_ALLOC_SIZE~;
-	if (alignment && !mem::is_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if ((alignment ?: mem::DEFAULT_MEM_ALIGNMENT) > self.alignment) return mem::INVALID_ALLOC_SIZE~;
 	if (!self.free_head) return mem::OUT_OF_MEMORY~;
 
@@ -159,7 +169,7 @@ fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alig
 fn void*? PoolAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
 	if (!old_pointer || new_size <= 0 || new_size > self.block_size) return mem::INVALID_ALLOC_SIZE~;
-	if (alignment && !mem::is_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if ((alignment ?: mem::DEFAULT_MEM_ALIGNMENT) > self.alignment) return mem::INVALID_ALLOC_SIZE~;
 
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);

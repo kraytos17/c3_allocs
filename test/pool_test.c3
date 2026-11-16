@@ -272,3 +272,24 @@ fn void pool_live_slots_survive_reuse_of_another_slot() @test
 	assert(live != reused);
 	for (sz i = 0; i < 16; i++) assert(live[i] == (char)(i + 1));
 }
+
+struct PoolTestPoint
+{
+	int x;
+	int y;
+}
+
+fn void pool_init_for_type_derives_size_and_alignment() @test
+{
+	char[512] storage;
+	allocators::PoolAllocator pool;
+	allocators::pool_init_for{PoolTestPoint}(&pool, storage[..]);
+	assert(pool.capacity() > 0);
+	assert(pool.available() == pool.capacity());
+	PoolTestPoint* point = alloc::new(&pool, PoolTestPoint);
+	point.x = 3;
+	point.y = 4;
+	assert(point.x + point.y == 7);
+	alloc::free(&pool, point);
+	assert(pool.available() == pool.capacity());
+}

@@ -245,8 +245,18 @@ list.clear(); // Discards all allocations at once.
   free range when possible, otherwise moves. Failure preserves the original.
 - The allocator is not thread-safe and does not run destructors.
 
+### Shared core and typed helpers
+
+- `src/allocators/common.c3` holds the shared alignment, padding, and
+  effective-alignment helpers used by all allocators. Helpers shared across
+  files are `@private`; file-local helpers stay `@local`.
+- Use the standard `alloc::new` / `alloc::new_try` macros for typed
+  allocation; they derive size and alignment from the type. For pools, use
+  `pool_init_for{Type}(&pool, storage[..])` to size slots from a type.
+
 ## Repository layout
 
+- `src/allocators/common.c3` — shared alignment helpers.
 - `src/allocators/arena.c3` — the arena implementation.
 - `src/allocators/pool.c3` — the fixed-slot pool implementation.
 - `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.

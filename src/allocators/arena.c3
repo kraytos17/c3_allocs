@@ -67,10 +67,7 @@ fn sz ArenaAllocator.bytes_reserved(&self) => self.used;
 
  @param [&inout] self : "The arena to clear"
 *>
-fn void ArenaAllocator.clear(&self)
-{
-	self.used = 0;
-}
+fn void ArenaAllocator.clear(&self) => self.used = 0;
 
 <*
  Save the current arena position for a later reset.
@@ -96,20 +93,6 @@ fn void ArenaAllocator.reset(&self, sz mark)
 }
 
 <*
- Check whether an optional allocation alignment is valid.
-
- Alignment zero means the allocator's default alignment. Non-zero alignments
- must satisfy C3's standard memory alignment rules.
-
- @param alignment : "The requested alignment, or zero for the default"
- @return "True if the alignment is supported"
-*>
-fn bool arena_valid_alignment(sz alignment) @local
-{
-	return !alignment || mem::is_valid_alignment(alignment);
-}
-
-<*
  Acquire a block of memory from the arena.
 
  Allocations are aligned to `alignment`, or to the allocator's default when
@@ -127,14 +110,14 @@ fn bool arena_valid_alignment(sz alignment) @local
 fn void*? ArenaAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
 	if (size <= 0) return mem::INVALID_ALLOC_SIZE~;
-	if (!arena_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if (self.used > self.data.len) return mem::OUT_OF_MEMORY~;
 	if (size > self.data.len) return mem::INVALID_ALLOC_SIZE~;
 	if (self.data.len < ArenaHeader::size) return mem::OUT_OF_MEMORY~;
 	if (self.used > sz::max - ArenaHeader::size) return mem::OUT_OF_MEMORY~;
 
 	sz previous_used = self.used;
-	alignment = allocators::alignment_for_allocation(alignment);
+	alignment = allocator_effective_alignment(alignment);
 	if (self.used > self.data.len - ArenaHeader::size) return mem::OUT_OF_MEMORY~;
 
 	sz after_header = self.used + ArenaHeader::size;
@@ -184,7 +167,7 @@ fn void*? ArenaAllocator.acquire(&self, sz size, AllocInitType init_type, sz ali
 fn void*? ArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
 	if (!old_pointer || new_size <= 0) return mem::INVALID_ALLOC_SIZE~;
-	if (!arena_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
+	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if (self.used > self.data.len) return mem::INVALID_ALLOC_SIZE~;
 
 	uptr base_addr = (uptr)self.data.ptr;
@@ -200,7 +183,7 @@ fn void*? ArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz alignm
 	if (old_size > self.used - old_offset) return mem::INVALID_ALLOC_SIZE~;
 
 	bool is_last = old_offset + old_size == self.used;
-	alignment = allocators::alignment_for_allocation(alignment);
+	alignment = allocator_effective_alignment(alignment);
 	if (is_last && mem::ptr_is_aligned(old_pointer, alignment))
 	{
 		if (new_size <= self.data.len - old_offset)
