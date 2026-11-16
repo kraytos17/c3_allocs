@@ -5,7 +5,7 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains three allocators:
+The repository currently contains four allocators:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
@@ -15,6 +15,10 @@ The repository currently contains three allocators:
 - **`BackedArenaAllocator`** — an arena that starts in a caller-provided buffer
   and obtains individual overflow blocks from a backing allocator. It supports
   marks and frees overflow blocks when resetting to an earlier mark.
+- **`FreeListAllocator`** — a variable-size allocator over caller-provided
+  storage. It uses first-fit selection, splits on allocate, and coalesces
+  neighbours on release. It supports in-place shrink and growth into an
+  adjacent free range, otherwise it moves on resize.
 
 ## Requirements
 
@@ -208,14 +212,48 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
   the old allocation. On failure, it leaves the original allocation valid.
 - The arena is not thread-safe. Reset/free do not run destructors.
 
+## Using `FreeListAllocator`
+
+`FreeListAllocator` manages variable-size blocks inside a borrowed buffer.
+First-fit selection splits a free range on allocate, and release merges
+adjacent free neighbours, so freeing everything restores one contiguous
+range (minus any initial alignment offset).
+
+```c3
+import std::core::mem::alloc;
+import c3_allocs::allocators;
+
+char[4096] storage;
+allocators::FreeListAllocator list;
+list.init(storage[..]);
+
+void* item = alloc::malloc(&list, 48);
+alloc::free(&list, item); // The range is freed and coalesced.
+list.clear(); // Discards all allocations at once.
+```
+
+### Free-list behavior and constraints
+
+- The buffer is borrowed; it must outlive the allocator and its allocations.
+- `capacity()` reports the borrowed length, `bytes_free()` reports free
+  ranges, and `bytes_used()` reports borrowed bytes not currently free.
+- `acquire` aligns payloads, supports `ZERO` init, and leaves state unchanged
+  on failure. A range is split only when the remainder can hold a free node.
+- `release` ignores null, foreign, interior, and duplicate releases, then
+  coalesces with adjacent free neighbours.
+- `resize` preserves the prefix. It shrinks in place, grows into an adjacent
+  free range when possible, otherwise moves. Failure preserves the original.
+- The allocator is not thread-safe and does not run destructors.
+
 ## Repository layout
 
 - `src/allocators/arena.c3` — the arena implementation.
 - `src/allocators/pool.c3` — the fixed-slot pool implementation.
 - `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.
+- `src/allocators/freelist.c3` — the variable-size free-list implementation.
 - `src/main.c3` — executable entry point.
-- `test/arena_test.c3`, `test/pool_test.c3`, and `test/backed_arena_test.c3` —
-  allocator behavior and failure-path tests.
+- `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
+  and `test/freelist_test.c3` — allocator behavior and failure-path tests.
 - `project.json` — C3 compiler project configuration.
 - `Makefile` — build, test, formatting, and clean targets.
 - `.c3fmt` — formatter configuration for `c3fmt`.
