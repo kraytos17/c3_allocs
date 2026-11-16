@@ -374,6 +374,49 @@ fn void backed_arena_can_reuse_a_mark_after_reset() @test
 	assert(arena.mark() == mark);
 }
 
+fn void backed_arena_nested_marks_reset_in_order() @test
+{
+	char[256] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	sz outer = arena.mark();
+	char* middle = arena.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	middle[0] = 0x11;
+	sz inner = arena.mark();
+	char* latest = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	latest[0] = 0x22;
+	assert(arena.overflow_count() + (arena.bytes_used() > 0 ? 1 : 0) > 0);
+
+	arena.reset(inner);
+	assert(arena.mark() == inner);
+	assert(middle[0] == 0x11);
+	arena.reset(outer);
+	assert(arena.mark() == outer);
+	assert(arena.overflow_count() == 0);
+}
+
+fn void backed_arena_mixed_initial_and_overflow_reset_keeps_older() @test
+{
+	char[256] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	char* first = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	first[0] = 0x41;
+	sz mark = arena.mark();
+	void* big = arena.acquire(512, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.overflow_count() == 1);
+	arena.reset(mark);
+	assert(arena.overflow_count() == 0);
+	assert(first[0] == 0x41);
+	assert(arena.bytes_used() == 8);
+	(void)big;
+}
+
 fn void backed_arena_failed_overflow_resize_preserves_old_block() @test
 {
 	char[8] initial_storage;

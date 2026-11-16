@@ -69,14 +69,16 @@ fn BackedArenaAllocator* BackedArenaAllocator.init(&self, char[] initial_data, A
 }
 
 <*
- Return a mark representing the current allocation sequence.
+ Return a mark representing the current allocation position.
 
- Pass the mark to `reset` to invalidate later allocations and free their
- overflow blocks. Marks are allocator-local and become invalid after reset to
- an earlier point or after `clear`/`free`.
+ Marks are positions in this arena's allocation history, not identities of
+ specific allocations. A mark remains usable after resetting to it, and may
+ be reused to discard newer allocations again. A mark must come from this
+ arena and must not be ahead of the current position. Marks from another
+ arena must not be used.
 
  @param [&in] self : "The arena to mark"
- @return "A mark for the current allocation sequence"
+ @return "A mark for the current allocation position"
 *>
 fn sz BackedArenaAllocator.mark(&self) => self.next_sequence - 1;
 
@@ -139,11 +141,12 @@ fn sz BackedArenaAllocator.initial_bytes_reserved(&self) => self.initial_used;
 
  Overflow blocks created after the mark are returned to the backing allocator.
  Initial-buffer allocations made after the mark are rewound. Allocations freed
- before reset are not resurrected. This does not run object destructors.
+ before reset are not resurrected. Resetting to the same mark repeatedly is
+ allowed. This does not run object destructors.
 
  @param [&inout] self : "The arena to reset"
  @param mark : "A mark previously returned by this arena"
- @require mark < self.next_sequence : "The mark must be from the current arena history"
+ @require mark < self.next_sequence : "The mark must not be ahead of the current arena position"
 *>
 fn void BackedArenaAllocator.reset(&self, sz mark)
 {

@@ -192,11 +192,13 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
 - Each overflow request is a separate backing allocation; this allocator does
   not grow and subdivide overflow chunks. The backing allocator must be able to
   allocate the page metadata plus payload as one block.
-- `mark`/`reset` invalidate allocations made after the mark. Reset releases
-  overflow blocks created after it and rewinds the initial buffer to the saved
-  position. `clear` resets to the beginning; `free` also detaches the arena
-  from its borrowed initial buffer and backing allocator, so it must be
-  reinitialized before further use.
+- `mark` returns a position in this arena's history and `reset` invalidates
+  later allocations. Reset releases overflow blocks created after the mark and
+  rewinds initial-buffer allocations after it. Reusing a mark after resetting
+  to it is allowed; a mark ahead of the current position, or from another
+  arena, must not be used. `clear` resets to the beginning; `free` also
+  detaches the arena from its borrowed initial buffer and backing allocator,
+  so it must be reinitialized before further use.
 - `release` frees overflow blocks immediately. For allocations inside the
   initial buffer, only a last-in-first-out release sequence reclaims space.
 - `resize` preserves the common prefix. It may resize the newest initial-buffer
