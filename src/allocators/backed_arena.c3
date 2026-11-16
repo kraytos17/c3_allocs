@@ -21,6 +21,8 @@ struct BackedArenaAllocator (Allocator) @mustinit
 	BackedArenaPage* pages;
 	sz initial_used;
 	sz next_sequence;
+	sz initial_total;
+	sz overflow_total;
 }
 
 struct BackedArenaHeader @local
@@ -65,6 +67,8 @@ fn BackedArenaAllocator* BackedArenaAllocator.init(&self, char[] initial_data, A
 	self.pages = null;
 	self.initial_used = 0;
 	self.next_sequence = 1;
+	self.initial_total = 0;
+	self.overflow_total = 0;
 	return self;
 }
 
@@ -138,6 +142,28 @@ fn sz BackedArenaAllocator.bytes_used(&self)
  @return "The current initial-buffer position"
 *>
 fn sz BackedArenaAllocator.initial_bytes_reserved(&self) => self.initial_used;
+
+<*
+ Return how many allocations were served from the borrowed initial buffer.
+
+ This is a lifetime count, unaffected by `reset` or `clear`. Compare with
+ `overflow_served` to see whether the initial buffer is well sized: a high
+ overflow share means most requests miss the fast path.
+
+ @param [&in] self : "The arena to query"
+ @return "The lifetime initial-buffer allocation count"
+*>
+fn sz BackedArenaAllocator.initial_served(&self) => self.initial_total;
+
+<*
+ Return how many allocations were served as overflow blocks.
+
+ This is a lifetime count, unaffected by `reset` or `clear`.
+
+ @param [&in] self : "The arena to query"
+ @return "The lifetime overflow allocation count"
+*>
+fn sz BackedArenaAllocator.overflow_served(&self) => self.overflow_total;
 
 <*
  Reset to a mark, invalidating allocations made after it.
@@ -293,6 +319,7 @@ fn void*? backed_arena_acquire_initial(
 	header.in_use = true;
 	self.last_initial_header = header;
 	self.initial_used = payload_offset + size;
+	self.initial_total++;
 	allocator_zero_if(header.payload, size, init_type);
 	return header.payload;
 }
@@ -334,6 +361,8 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	page.sequence = sequence;
 	page.allocation_alignment = alignment;
 	self.pages = page;
+	self.overflow_total++;
+	allocator_zero_if(payload, size, init_type);
 	return payload;
 }
 

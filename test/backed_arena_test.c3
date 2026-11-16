@@ -463,3 +463,44 @@ fn void backed_arena_failed_overflow_resize_preserves_old_block() @test
 	}
 	assert(false, "Expected overflow allocation to fail with a null backing allocator.");
 }
+
+fn void backed_arena_served_counts_track_paths() @test
+{
+	char[128] initial_storage;
+	char[1024] backing_storage;
+	allocators::ArenaAllocator backing_arena;
+	backing_arena.init(backing_storage[..]);
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], &backing_arena);
+	assert(arena.initial_served() == 0);
+	assert(arena.overflow_served() == 0);
+
+	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.initial_served() == 1);
+	assert(arena.overflow_served() == 0);
+	(void)arena.acquire(512, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.initial_served() == 1);
+	assert(arena.overflow_served() == 1);
+	arena.reset(0);
+	assert(arena.initial_served() == 1);
+	assert(arena.overflow_served() == 1);
+	arena.clear();
+	assert(arena.initial_served() == 1);
+	assert(arena.overflow_served() == 1);
+}
+
+fn void backed_arena_overflow_honors_zero_init() @test
+{
+	char[8] initial_storage;
+	char[512] backing_storage;
+	allocators::ArenaAllocator backing_arena;
+	backing_arena.init(backing_storage[..]);
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], &backing_arena);
+
+	char* dirty = arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 64; i++) dirty[i] = (char)0xFF;
+	arena.release(dirty, false);
+	char* clean = arena.acquire(64, alloc::AllocInitType.ZERO)!!;
+	for (sz i = 0; i < 64; i++) assert(clean[i] == 0);
+}

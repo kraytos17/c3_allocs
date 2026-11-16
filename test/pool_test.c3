@@ -293,3 +293,19 @@ fn void pool_init_for_type_derives_size_and_alignment() @test
 	alloc::free(&pool, point);
 	assert(pool.available() == pool.capacity());
 }
+
+fn void pool_payload_size_and_ownership_queries() @test
+{
+	char[256] storage;
+	allocators::PoolAllocator pool;
+	pool.init(storage[..], 24);
+	assert(pool.payload_size() == 24);
+
+	void* item = pool.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	assert(pool.owns(item));
+	assert(!pool.owns((char*)item + 1));
+	assert(!pool.owns(null));
+	assert(!pool.owns((void*)0x1));
+	pool.release(item, false);
+	assert(pool.owns(item));
+}

@@ -112,6 +112,27 @@ fn PoolAllocator* pool_init_for(
 fn sz PoolAllocator.capacity(&self) => self.slot_count;
 
 <*
+ Return the maximum payload size one slot can serve.
+
+ @param [&in] self : "The pool to inspect"
+ @return "The configured block size"
+*>
+fn sz PoolAllocator.payload_size(&self) => self.block_size;
+
+<*
+ Check whether a pointer is an exact slot payload of this pool.
+
+ This reports ownership regardless of whether the slot is currently live,
+ so release routing can find the owning pool for duplicate releases too.
+ Interior pointers and foreign addresses report false.
+
+ @param [&in] self : "The pool to validate against"
+ @param pointer : "A candidate payload pointer"
+ @return "True when the pointer is a slot payload of this pool"
+*>
+fn bool PoolAllocator.owns(&self, void* pointer) => pool_slot_for_pointer(self, pointer) != null;
+
+<*
  Return the number of currently available slots in constant time.
 
  @param [&in] self : "The pool to inspect"

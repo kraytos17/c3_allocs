@@ -358,3 +358,21 @@ fn void arena_last_resize_alignment_failure_preserves_original() @test
 	}
 	assert(false, "Expected stricter-alignment resize to fail without moving the last block.");
 }
+
+fn void arena_grouped_allocations_reduce_waste() @test
+{
+	char[512] storage;
+	allocators::ArenaAllocator arena;
+	arena.init(storage[..]);
+	for (sz i = 0; i < 4; i++)
+	{
+		(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO, 32)!!;
+		(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO, 8)!!;
+	}
+	sz interleaved_used = arena.bytes_reserved();
+
+	arena.clear();
+	for (sz i = 0; i < 4; i++) (void)arena.acquire(8, alloc::AllocInitType.NO_ZERO, 32)!!;
+	for (sz i = 0; i < 4; i++) (void)arena.acquire(8, alloc::AllocInitType.NO_ZERO, 8)!!;
+	assert(arena.bytes_reserved() <= interleaved_used);
+}

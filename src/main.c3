@@ -58,5 +58,23 @@ fn int main(String[] args)
 	alloc::free(&freelist, list_second);
 	freelist.clear();
 	io::printf("freelist after clear: free=%d\n", freelist.bytes_free());
+
+	char[512] class_small;
+	char[512] class_large;
+	char[][2] class_bufs = { class_small[..], class_large[..] };
+	sz[2] class_sizes = { 32, 256 };
+	allocators::SizeClassAllocator classes;
+	classes.init(class_bufs[..], class_sizes[..]);
+	void* small = alloc::malloc(&classes, 24);
+	io::printf("sizeclass: capacity=%d available=%d\n", classes.capacity(), classes.available());
+	alloc::free(&classes, small);
+
+	char[1024] scratch_storage;
+	allocators::ScratchAllocator scratch;
+	scratch.init(scratch_storage[..]);
+	void* tmp = alloc::malloc(&scratch, 64);
+	(void)tmp;
+	io::printf("scratch: reserved=%d peak=%d\n", scratch.bytes_reserved(), scratch.peak());
+	scratch.clear();
 	return 0;
 }

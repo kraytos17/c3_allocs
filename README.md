@@ -5,7 +5,7 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains four allocators:
+The repository currently contains six allocators:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
@@ -19,6 +19,11 @@ The repository currently contains four allocators:
   storage. It uses first-fit selection, splits on allocate, and coalesces
   neighbours on release. It supports in-place shrink and growth into an
   adjacent free range, otherwise it moves on resize.
+- **`SizeClassAllocator`** — a dispatcher that routes requests to the
+  smallest fitting fixed-size pool. It bounds waste for mixed sizes while
+  keeping pool O(1) release and stable pointers.
+- **`ScratchAllocator`** — a single-frame allocator wrapping an arena with
+  a high-water mark for tuning frame buffer sizes.
 
 ## Requirements
 
@@ -121,6 +126,11 @@ requested alignment requires a different address, the arena may instead
 allocate a replacement and copy the contents, provided enough unused capacity
 remains.
 
+Group allocations by alignment to cut padding waste: allocate all
+high-alignment objects first, then the low-alignment ones. Interleaving
+alignments forces padding before almost every block, while grouped order
+pays it once per alignment level.
+
 ### Limitations
 
 - The arena is not thread-safe; synchronize access externally if sharing it.
@@ -153,7 +163,10 @@ alloc::free(&pool, item); // The released slot can be reused.
 - The pool borrows its buffer; the buffer must outlive the pool and its
   allocations.
 - The pool has a fixed number of equal-sized slots. `capacity()` reports the
-  slot count and `available()` reports the current free-slot count.
+  slot count, `available()` the free slots, and `payload_size()` the maximum
+  payload per slot. `owns()` tests whether a pointer is a slot payload.
+- Use `pool_init_for{Type}(&pool, storage[..])` to size slots from a type
+  instead of passing raw sizes.
 - Requests larger than the configured payload size, with unsupported
   alignment, or after all slots are in use fail without consuming a slot.
 - `release` makes a valid slot available for reuse. Null, foreign, interior,
@@ -207,6 +220,9 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
   reinitialized before further use.
 - `release` frees overflow blocks immediately. For allocations inside the
   initial buffer, only a last-in-first-out release sequence reclaims space.
+- `initial_served()` and `overflow_served()` count lifetime allocations per
+  path. A high overflow share means the initial buffer is undersized for
+  the workload.
 - `resize` preserves the common prefix. It may resize the newest initial-buffer
   allocation in place; otherwise it acquires a replacement before releasing
   the old allocation. On failure, it leaves the original allocation valid.
@@ -245,7 +261,63 @@ list.clear(); // Discards all allocations at once.
   coalesces with adjacent free neighbours.
 - `resize` preserves the prefix. It shrinks in place, grows into an adjacent
   free range when possible, otherwise moves. Failure preserves the original.
+- `largest_free()` reports the biggest contiguous range and
+  `free_block_count()` how many ranges exist. Allocations larger than
+  `largest_free` fail even when `bytes_free` is bigger.
 - The allocator is not thread-safe and does not run destructors.
+
+## Using `SizeClassAllocator`
+
+`SizeClassAllocator` routes mixed-size requests across fixed-size pools.
+Each class is a `PoolAllocator` over its own borrowed buffer, so blocks
+never move and release stays O(1). `acquire` picks the smallest class that
+fits and has a free slot, bounding waste to the gap between classes.
+
+```c3
+char[512] small_buf;
+char[512] large_buf;
+char[][2] bufs = { small_buf[..], large_buf[..] };
+sz[2] sizes = { 32, 256 };
+allocators::SizeClassAllocator sc;
+sc.init(bufs[..], sizes[..]);
+
+void* item = alloc::malloc(&sc, 24); // Served by the 32-byte class.
+alloc::free(&sc, item);
+```
+
+### Size-class guidance
+
+- Prefer stepped tables where most requests land, then factored growth:
+  for example 24, 48, 96, 192, 384. Wide gaps waste memory on every
+  allocation in the upper class.
+- Classes you never use still reserve their whole buffer, so only configure
+  sizes you actually allocate. Unused capacity shows up as a large
+  `class_available()` on an idle class.
+- `capacity()` and `available()` sum across classes; `class_block_size(i)`
+  and `class_available(i)` inspect one class. Requests larger than every
+  class report `INVALID_ALLOC_SIZE`; a full fitting class reports
+  `OUT_OF_MEMORY`.
+
+## Using `ScratchAllocator`
+
+`ScratchAllocator` is a single-frame allocator: a thin `ArenaAllocator`
+wrapper with a high-water mark. Allocate freely during the frame, then
+`clear()` once at the frame boundary.
+
+```c3
+allocators::ScratchAllocator scratch;
+scratch.init(storage[..]);
+
+void* tmp = alloc::malloc(&scratch, 64);
+// ... frame work ...
+scratch.clear(); // One O(1) bulk reset for the next frame.
+```
+
+- `peak()` reports the highest reserved bytes since init or `reset_peak`.
+  Size the buffer from it: grow when `peak` nears `capacity`, shrink when
+  it stays far below.
+- `mark`/`reset`/`release`/`resize` match arena semantics; `clear()` keeps
+  the peak so tuning survives across frames.
 
 ### Shared core and typed helpers
 
@@ -264,9 +336,13 @@ list.clear(); // Discards all allocations at once.
 - `src/allocators/pool.c3` — the fixed-slot pool implementation.
 - `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.
 - `src/allocators/freelist.c3` — the variable-size free-list implementation.
+- `src/allocators/sizeclass.c3` — the size-class dispatcher over pools.
+- `src/allocators/scratch.c3` — the single-frame scratch allocator.
 - `src/main.c3` — executable entry point.
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
-  and `test/freelist_test.c3` — allocator behavior and failure-path tests.
+  `test/freelist_test.c3`, `test/sizeclass_test.c3`,
+  `test/scratch_test.c3`, and `test/common_test.c3` — allocator behavior
+  and failure-path tests.
 - `project.json` — C3 compiler project configuration.
 - `Makefile` — build, test, formatting, and clean targets.
 - `.c3fmt` — formatter configuration for `c3fmt`.
