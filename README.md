@@ -1,42 +1,53 @@
 # c3_allocs
 
-Project-local memory allocators written in [C3](https://c3-lang.org/). The
-allocators implement C3's `std::core::mem::alloc::Allocator` interface, so they
-can be used with the standard allocation helpers without modifying the
-installed C3 standard library.
+`c3_allocs` is a C3 project for experimenting with memory allocators that
+implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
-> **Project status:** early development. The fixed-buffer arena is currently
-> implemented; other allocator types may be added as the project grows.
+## Current status
+
+The repository currently contains one allocator:
+
+- **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
+  byte slice. It supports alignment, zero-initialized allocation, resize,
+  last-allocation release, and mark/reset bulk reclamation.
 
 ## Requirements
 
-- The C3 compiler (`c3c`). The project currently targets C3 language revision 1.
-- `c3fmt` is optional and only needed to check formatting.
+- The C3 compiler, `c3c`, with support for language revision 1.
+- GNU Make for the convenience targets below.
+- `c3fmt` is optional; it is used by the formatting targets.
 
-## Build and test
-
-From the repository root:
+The Makefile uses `c3c` and `c3fmt` from `PATH` by default. Override either
+command when needed, for example:
 
 ```sh
-make             # Build the executable
-make test        # Run the test suite
-make run         # Build and run the executable
-make fmt-check   # Check C3 formatting without editing files
-make fmt         # Format C3 files in place
-make check       # Run formatting check, tests, and build
-make clean       # Remove build artifacts
+make C3C=/path/to/c3c build
+make C3FMT=/path/to/c3fmt fmt-check
 ```
 
-The executable and intermediate build files are written under `build/`. The
-Makefile uses `c3c` and `c3fmt` from `PATH` by default; override them if needed,
-for example `make C3C=/path/to/c3c test`. `make fmt` formats files in place;
-review the resulting changes before committing them.
+## Build, run, test, and format
 
-## Arena allocator
+Run these commands from the repository root:
 
-`c3_allocs::allocators::ArenaAllocator` allocates from a fixed-size buffer
-provided by the caller. It is useful when many allocations share a lifetime and
-can all be reclaimed together.
+```sh
+make             # Show available targets (the default)
+make build       # Compile the executable
+make run         # Build and run the executable
+make test        # Run the C3 test suite
+make fmt-check   # Check C3 formatting without changing files
+make fmt         # Format C3 files in place
+make check       # Run fmt-check, test, and build in sequence
+make clean       # Remove C3 build artifacts
+```
+
+`make all` is an alias for `make build`. Build outputs are written under
+`build/`. The `make fmt` target edits files in `src/` and `test/`; review its
+changes before committing them. Formatting rules are in the root `.c3fmt` file.
+
+## Using `ArenaAllocator`
+
+The arena borrows its backing buffer. That buffer must remain alive for as long
+as the arena and any pointers allocated from it are used.
 
 ```c3
 import std::core::mem::alloc;
@@ -50,49 +61,71 @@ char* bytes = alloc::malloc(&arena, 128);
 // Use bytes while storage and arena remain alive.
 alloc::free(&arena, bytes);
 
-arena.clear(); // Invalidates every allocation from the arena.
+arena.clear(); // Invalidates all allocations made from the arena.
 ```
 
-### Arena behavior and constraints
+### Allocation behavior
 
-- The arena **borrows** the supplied buffer. The buffer must outlive the arena
-  and every pointer allocated from it.
-- Allocations honor valid C3 alignments. Passing alignment `0` selects the
-  default alignment.
-- The arena has fixed capacity. Allocation fails when the buffer has no room;
-  it does not allocate additional backing storage.
-- `release` reclaims storage only when releasing the most recent allocation.
-  Releasing an earlier allocation has no effect. Use marks and `reset`, or use
-  `clear`, to reclaim groups of allocations.
-- `resize` preserves the common prefix of the allocation. The most recent
-  allocation is resized in place when it meets the requested alignment and
-  there is enough capacity. Otherwise, the arena attempts to allocate a new
-  block and copy the contents. If that fails, the old allocation remains valid
-  and the arena state is unchanged. A full arena cannot move its most recent
-  allocation elsewhere while also guaranteeing the original remains valid on
-  failure.
-- Direct zero-sized allocations are rejected. The standard `alloc` helpers
-  handle zero-sized requests according to their own API behavior.
-- The arena is not thread-safe. `reset` and `clear` invalidate allocations but
-  do not run destructors for values stored in the buffer.
+- The arena has fixed capacity and does not request more backing memory. An
+  allocation that does not fit returns an allocation error.
+- Alignment `0` requests the default C3 memory alignment. Non-zero alignments
+  must be valid C3 alignments; invalid values are rejected.
+- `AllocInitType.ZERO` clears the requested allocation. `NO_ZERO` leaves it
+  uninitialized.
+- Direct calls to `acquire` reject zero or negative sizes. The standard `alloc`
+  helper layer has its own zero-size behavior.
+- A failed allocation does not advance the arena's used position.
 
-### Mark and reset
+### Release and bulk reclamation
 
-Save a position before a group of temporary allocations, then reset to it when
-that group is no longer needed:
+`release` can reclaim space only when given the most recently allocated block.
+Releasing an earlier block has no effect, and freeing it does not make its
+space reusable while later allocations remain. When releasing blocks in
+last-in-first-out order, each release can reclaim the latest block.
+
+Use `mark` and `reset` to reclaim allocations made after a saved position, or
+`clear` to discard all arena allocations:
 
 ```c3
 sz mark = arena.mark();
 char* temporary = alloc::malloc(&arena, 256);
-// Use temporary within this scope.
+// Use temporary before resetting.
 arena.reset(mark); // Invalidates allocations made after mark.
 ```
 
-Do not use pointers to allocations after the arena has been reset or cleared.
+After `reset` or `clear`, do not use pointers to allocations that were
+invalidated. These operations do not zero the backing buffer or run destructors
+for values stored in it.
 
-## Project layout
+### Resize behavior
 
-- `src/` — allocator implementations and executable entry point.
-- `test/` — allocator tests.
-- `lib/` — project-local C3 dependencies.
-- `.c3fmt` — repository formatting preferences for `c3fmt`.
+`resize` preserves the byte prefix up to the smaller of the old and new sizes.
+It resizes the most recent block in place when the pointer meets the requested
+alignment and the new size fits. Otherwise, it tries to allocate a replacement
+block and copy the old contents. This can move a non-last block, but the old
+block remains reserved because it is no longer the latest allocation.
+
+If replacement allocation fails, resize returns an error and preserves the old
+block and arena state. If the newest block cannot grow in place, the arena
+cannot move it elsewhere within the same fixed buffer while guaranteeing the
+original stays valid on failure, so that resize fails instead.
+
+### Limitations
+
+- The arena is not thread-safe; synchronize access externally if sharing it.
+- Resetting or clearing invalidates pointers into reclaimed storage.
+- Values that require cleanup are not automatically destroyed when storage is
+  released or reset. Arrange any required cleanup before invalidating their
+  storage.
+
+## Repository layout
+
+- `src/allocators/arena.c3` — the arena implementation.
+- `src/main.c3` — executable entry point.
+- `test/arena_test.c3` — arena behavior and failure-path tests.
+- `project.json` — C3 compiler project configuration.
+- `Makefile` — build, test, formatting, and clean targets.
+- `.c3fmt` — formatter configuration for `c3fmt`.
+- `lib/` — configured C3 dependency search directory; currently no dependency
+  is vendored there. The Makefile creates the directory before C3 build/test
+  commands if it is absent.
