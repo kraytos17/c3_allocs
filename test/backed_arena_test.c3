@@ -376,26 +376,56 @@ fn void backed_arena_can_reuse_a_mark_after_reset() @test
 
 fn void backed_arena_nested_marks_reset_in_order() @test
 {
-	char[256] initial_storage;
+	char[16] initial_storage;
 	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
 	allocators::BackedArenaAllocator arena;
 	arena.init(initial_storage[..], backing);
 
-	(void)arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	// The 16-byte buffer cannot hold headers, so every allocation overflows.
+	char* first = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	first[0] = 0x11;
 	sz outer = arena.mark();
-	char* middle = arena.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
-	middle[0] = 0x11;
+	char* middle = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	middle[0] = 0x22;
+	assert(arena.overflow_count() == 2);
 	sz inner = arena.mark();
 	char* latest = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
-	latest[0] = 0x22;
-	assert(arena.overflow_count() + (arena.bytes_used() > 0 ? 1 : 0) > 0);
+	latest[0] = 0x33;
+	assert(arena.overflow_count() == 3);
 
 	arena.reset(inner);
 	assert(arena.mark() == inner);
-	assert(middle[0] == 0x11);
+	assert(arena.overflow_count() == 2);
+	assert(middle[0] == 0x22);
+	assert(first[0] == 0x11);
 	arena.reset(outer);
 	assert(arena.mark() == outer);
-	assert(arena.overflow_count() == 0);
+	assert(arena.overflow_count() == 1);
+	assert(first[0] == 0x11);
+	(void)latest;
+}
+
+fn void backed_arena_stale_mark_aliases_new_history_positionally() @test
+{
+	char[16] initial_storage;
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], backing);
+
+	char* first = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	first[0] = 0x41;
+	sz mark = arena.mark();
+	(void)arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	arena.reset(0);
+	char* replacement = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	replacement[0] = 0x42;
+	(void)arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.overflow_count() == 2);
+	arena.reset(mark);
+	assert(arena.mark() == mark);
+	assert(arena.overflow_count() == 1);
+	assert(replacement[0] == 0x42);
+	(void)first;
 }
 
 fn void backed_arena_mixed_initial_and_overflow_reset_keeps_older() @test

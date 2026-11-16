@@ -195,10 +195,12 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
 - `mark` returns a position in this arena's history and `reset` invalidates
   later allocations. Reset releases overflow blocks created after the mark and
   rewinds initial-buffer allocations after it. Reusing a mark after resetting
-  to it is allowed; a mark ahead of the current position, or from another
-  arena, must not be used. `clear` resets to the beginning; `free` also
-  detaches the arena from its borrowed initial buffer and backing allocator,
-  so it must be reinitialized before further use.
+  to it is allowed. Marks are positional, not identities: after a rewind,
+  an older mark at the same position refers to the new history. A mark
+  ahead of the current position, or from another arena, must not be used.
+  `clear` resets to the beginning; `free` also detaches the arena from its
+  borrowed initial buffer and backing allocator, so it must be
+  reinitialized before further use.
 - `release` frees overflow blocks immediately. For allocations inside the
   initial buffer, only a last-in-first-out release sequence reclaims space.
 - `resize` preserves the common prefix. It may resize the newest initial-buffer

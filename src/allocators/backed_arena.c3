@@ -73,9 +73,12 @@ fn BackedArenaAllocator* BackedArenaAllocator.init(&self, char[] initial_data, A
 
  Marks are positions in this arena's allocation history, not identities of
  specific allocations. A mark remains usable after resetting to it, and may
- be reused to discard newer allocations again. A mark must come from this
- arena and must not be ahead of the current position. Marks from another
- arena must not be used.
+ be reused to discard newer allocations again. If the arena is rewound and
+ new allocations are made, an older mark at the same position now refers to
+ the new history; resetting to it discards allocations made after that
+ position. A mark must come from this arena and must not be ahead of the
+ current position. Marks from another arena must not be used. This matches
+ the positional mark/reset style used by the standard library arenas.
 
  @param [&in] self : "The arena to mark"
  @return "A mark for the current allocation position"
@@ -142,7 +145,9 @@ fn sz BackedArenaAllocator.initial_bytes_reserved(&self) => self.initial_used;
  Overflow blocks created after the mark are returned to the backing allocator.
  Initial-buffer allocations made after the mark are rewound. Allocations freed
  before reset are not resurrected. Resetting to the same mark repeatedly is
- allowed. This does not run object destructors.
+ allowed. Because marks are positional, resetting to an older mark after new
+ allocations were made discards those newer allocations. This does not run
+ object destructors.
 
  @param [&inout] self : "The arena to reset"
  @param mark : "A mark previously returned by this arena"
