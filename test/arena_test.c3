@@ -312,3 +312,49 @@ fn void arena_stress_exhaust_and_reset_cycles() @test
 		assert(arena.used == 0);
 	}
 }
+
+fn void arena_exact_fit_uses_final_buffer_byte() @test
+{
+	char[64] storage;
+	allocators::ArenaAllocator arena;
+	arena.init(storage[..]);
+
+	// Discover the amount consumed by one byte, then reset before exact-fit checks.
+	(void)arena.acquire(1, alloc::AllocInitType.NO_ZERO)!!;
+	sz overhead = arena.used - 1;
+	arena.clear();
+
+	void* exact = arena.acquire(storage.len - overhead, alloc::AllocInitType.NO_ZERO)!!;
+	assert(exact != null);
+	assert(arena.used == storage.len);
+
+	void*? extra = arena.acquire(1, alloc::AllocInitType.NO_ZERO);
+	if (catch extra)
+	{
+		assert(arena.used == storage.len);
+		return;
+	}
+	assert(false, "Expected allocation beyond exact arena capacity to fail.");
+}
+
+fn void arena_last_resize_alignment_failure_preserves_original() @test
+{
+	char[64] storage;
+	allocators::ArenaAllocator arena;
+	arena.init(storage[..]);
+
+	char* original = arena.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 16; i++) original[i] = (char)(i + 0x30);
+	sz used_before = arena.used;
+
+	// The buffer is deliberately too small for moving this final block to a
+	// separate 64-byte-aligned location while preserving the original on failure.
+	void*? failed = arena.resize(original, 80, 64);
+	if (catch failed)
+	{
+		assert(arena.used == used_before);
+		for (sz i = 0; i < 16; i++) assert(original[i] == (char)(i + 0x30));
+		return;
+	}
+	assert(false, "Expected stricter-alignment resize to fail without moving the last block.");
+}

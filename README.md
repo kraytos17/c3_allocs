@@ -5,11 +5,13 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains one allocator:
+The repository currently contains two allocators:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
   last-allocation release, and mark/reset bulk reclamation.
+- **`PoolAllocator`** — a fixed-capacity pool that divides caller-provided
+  storage into equal-sized slots and reuses individual slots after release.
 
 ## Requirements
 
@@ -106,9 +108,11 @@ block and copy the old contents. This can move a non-last block, but the old
 block remains reserved because it is no longer the latest allocation.
 
 If replacement allocation fails, resize returns an error and preserves the old
-block and arena state. If the newest block cannot grow in place, the arena
-cannot move it elsewhere within the same fixed buffer while guaranteeing the
-original stays valid on failure, so that resize fails instead.
+block and arena state. When the newest block already meets the requested
+alignment but cannot extend in place, resize fails rather than moving it. If the
+requested alignment requires a different address, the arena may instead
+allocate a replacement and copy the contents, provided enough unused capacity
+remains.
 
 ### Limitations
 
@@ -118,11 +122,47 @@ original stays valid on failure, so that resize fails instead.
   released or reset. Arrange any required cleanup before invalidating their
   storage.
 
+## Using `PoolAllocator`
+
+`PoolAllocator` is intended for workloads with many allocations that fit a
+common maximum size. Initialization sets the maximum payload size and supported
+alignment; the pool calculates how many slots fit in the supplied buffer.
+
+```c3
+import std::core::mem::alloc;
+import c3_allocs::allocators;
+
+char[4096] storage;
+allocators::PoolAllocator pool;
+pool.init(storage[..], 64, 16); // 64-byte payloads, up to 16-byte alignment.
+
+void* item = alloc::malloc(&pool, 48);
+// Use item while storage and pool remain alive.
+alloc::free(&pool, item); // The released slot can be reused.
+```
+
+### Pool behavior and constraints
+
+- The pool borrows its buffer; the buffer must outlive the pool and its
+  allocations.
+- The pool has a fixed number of equal-sized slots. `capacity()` reports the
+  slot count and `available()` reports the current free-slot count.
+- Requests larger than the configured payload size, with unsupported
+  alignment, or after all slots are in use fail without consuming a slot.
+- `release` makes a valid slot available for reuse. Null, foreign, interior,
+  and duplicate-release pointers are ignored.
+- `resize` stays in the same slot and can only change the requested size up to
+  the configured payload size. It never moves or grows the slot.
+- The pool is not thread-safe and does not run destructors for values stored
+  in its memory.
+
 ## Repository layout
 
 - `src/allocators/arena.c3` — the arena implementation.
+- `src/allocators/pool.c3` — the fixed-slot pool implementation.
 - `src/main.c3` — executable entry point.
-- `test/arena_test.c3` — arena behavior and failure-path tests.
+- `test/arena_test.c3` and `test/pool_test.c3` — allocator behavior and
+  failure-path tests.
 - `project.json` — C3 compiler project configuration.
 - `Makefile` — build, test, formatting, and clean targets.
 - `.c3fmt` — formatter configuration for `c3fmt`.
