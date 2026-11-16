@@ -169,3 +169,106 @@ fn void pool_ignores_foreign_and_duplicate_releases() @test
 	pool.release(bytes, false);
 	assert(pool.available() == available_after_release);
 }
+
+fn void pool_zero_capacity_when_buffer_cannot_hold_a_slot() @test
+{
+	char[1] storage;
+	allocators::PoolAllocator pool;
+	pool.init(storage[..], 32);
+
+	assert(pool.capacity() == 0);
+	assert(pool.available() == 0);
+	void*? failed = pool.acquire(1, alloc::AllocInitType.NO_ZERO);
+	if (catch failed) return;
+	assert(false, "Expected an undersized buffer to create an empty pool.");
+}
+
+fn void pool_exact_capacity_has_disjoint_slots() @test
+{
+	char[512] storage;
+	allocators::PoolAllocator pool;
+	pool.init(storage[..], 16);
+	sz capacity = pool.capacity();
+	assert(capacity > 1);
+
+	assert(capacity <= 32);
+	void*[32] allocations;
+	for (sz i = 0; i < capacity; i++)
+	{
+		void* current = pool.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+		for (sz j = 0; j < i; j++) assert(current != allocations[j]);
+		allocations[i] = current;
+	}
+	assert(pool.available() == 0);
+	for (sz i = 0; i < capacity; i++) pool.release(allocations[i], false);
+	assert(pool.available() == capacity);
+}
+
+fn void pool_rejects_zero_negative_and_invalid_alignment_without_consuming_slots() @test
+{
+	char[256] storage;
+	allocators::PoolAllocator pool;
+	pool.init(storage[..], 16, 16);
+	sz free_before = pool.available();
+
+	void*? zero = pool.acquire(0, alloc::AllocInitType.NO_ZERO);
+	if (catch zero)
+	{
+	}
+	else
+	{
+		assert(false, "Expected zero-size pool request to fail.");
+	}
+	void*? negative = pool.acquire(-1, alloc::AllocInitType.NO_ZERO);
+	if (catch negative)
+	{
+	}
+	else
+	{
+		assert(false, "Expected negative-size pool request to fail.");
+	}
+	void*? bad_alignment = pool.acquire(8, alloc::AllocInitType.NO_ZERO, 3);
+	if (catch bad_alignment)
+	{
+	}
+	else
+	{
+		assert(false, "Expected invalid alignment to fail.");
+	}
+	assert(pool.available() == free_before);
+}
+
+fn void pool_rejected_resize_preserves_data_and_availability() @test
+{
+	char[256] storage;
+	allocators::PoolAllocator pool;
+	pool.init(storage[..], 16, 16);
+
+	char* bytes = pool.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 8; i++) bytes[i] = (char)(0x60 + i);
+	sz free_before = pool.available();
+	void*? failed = pool.resize(bytes, 12, 64);
+	if (catch failed)
+	{
+		assert(pool.available() == free_before);
+		for (sz i = 0; i < 8; i++) assert(bytes[i] == (char)(0x60 + i));
+		return;
+	}
+	assert(false, "Expected unsupported resize alignment to fail.");
+}
+
+fn void pool_live_slots_survive_reuse_of_another_slot() @test
+{
+	char[256] storage;
+	allocators::PoolAllocator pool;
+	pool.init(storage[..], 16);
+
+	char* live = pool.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	void* recycled = pool.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 16; i++) live[i] = (char)(i + 1);
+	pool.release(recycled, false);
+	void* reused = pool.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	assert(reused == recycled);
+	assert(live != reused);
+	for (sz i = 0; i < 16; i++) assert(live[i] == (char)(i + 1));
+}

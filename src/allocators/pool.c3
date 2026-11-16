@@ -20,6 +20,7 @@ struct PoolAllocator (Allocator)
 	sz slot_stride;
 	sz first_slot_offset;
 	sz slot_count;
+	sz free_count;
 }
 
 struct PoolSlot @local
@@ -74,6 +75,7 @@ fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz al
 	self.slot_stride = slot_stride;
 	self.first_slot_offset = first_slot_offset;
 	self.slot_count = capacity;
+	self.free_count = capacity;
 	PoolSlot* free_head = null;
 	for (sz i = capacity; i > 0; i--)
 	{
@@ -97,21 +99,14 @@ fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz al
 fn sz PoolAllocator.capacity(&self) => self.slot_count;
 
 <*
- Return the number of currently available slots.
+ Return the number of currently available slots in constant time.
 
  @param [&in] self : "The pool to inspect"
  @return "The number of unused slots"
 *>
 fn sz PoolAllocator.available(&self)
 {
-	sz count = 0;
-	PoolSlot* slot = self.free_head;
-	while (slot)
-	{
-		count++;
-		slot = slot.next;
-	}
-	return count;
+	return self.free_count;
 }
 
 <*
@@ -137,6 +132,7 @@ fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alig
 
 	PoolSlot* slot = self.free_head;
 	self.free_head = slot.next;
+	self.free_count--;
 	slot.next = null;
 	slot.requested_size = size;
 	slot.in_use = true;
@@ -211,10 +207,11 @@ fn PoolSlot* pool_slot_for_pointer(PoolAllocator* self, void* pointer) @local
 fn void PoolAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 {
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
-	if (!slot || !slot.in_use) return;
+	if (!slot || !slot.in_use || self.free_count >= self.slot_count) return;
 
 	slot.in_use = false;
 	slot.requested_size = 0;
 	slot.next = self.free_head;
 	self.free_head = slot;
+	self.free_count++;
 }
