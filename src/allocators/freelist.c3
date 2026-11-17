@@ -20,6 +20,21 @@ struct FreeListAllocator (Allocator) @mustinit
 	char[] data;
 	FreeListFreeBlock* free_head;
 	sz free_bytes;
+	bool best_fit;
+}
+
+<*
+ Selection policy for `acquire`.
+
+ FIRST FIT stops at the first range that fits: fastest, and pairs well
+ with address-ordered release and coalescing. BEST FIT scans all ranges
+ and picks the smallest fitting one: better for workloads with widely
+ varying sizes, at the cost of a full scan on every miss.
+*>
+enum FreeListPolicy
+{
+	FIRST_FIT,
+	BEST_FIT
 }
 
 <*
@@ -57,6 +72,7 @@ struct FreeListUsedHeader @local
  block alignment; any leading bytes before that address stay reserved. When
  the usable remainder cannot hold a free node, the allocator starts empty
  and every acquisition fails until it is cleared over a larger buffer.
+ Selection defaults to `FIRST_FIT`; switch with `set_policy`.
 
  @param [&out] self : "The allocator to initialize"
  @param storage : "The caller-owned buffer managed by this allocator"
@@ -67,6 +83,7 @@ fn FreeListAllocator* FreeListAllocator.init(&self, char[] storage)
 	self.data = storage;
 	self.free_head = null;
 	self.free_bytes = 0;
+	self.best_fit = false;
 	if (storage.len >= FreeListFreeBlock::size)
 	{
 		uptr base_addr = (uptr)storage.ptr;
@@ -271,12 +288,21 @@ fn void freelist_insert_coalesce(FreeListAllocator* self, void* start, sz size) 
 }
 
 <*
- Acquire a variable-size block using first-fit selection.
+ Set the range selection policy.
+
+ @param [&inout] self : "The allocator to retune"
+ @param policy : "`FIRST_FIT` or `BEST_FIT`"
+*>
+fn void FreeListAllocator.set_policy(&self, FreeListPolicy policy) => self.best_fit = policy == BEST_FIT;
+
+<*
+ Acquire a variable-size block using the configured selection policy.
 
  The payload meets `alignment`, or the default C3 alignment when zero.
  `ZERO` clears only the requested payload bytes. A free range is split when
  the remainder can still hold a free node; otherwise the whole range is used.
- Failure leaves allocator state unchanged.
+ `FIRST_FIT` stops at the first fitting range; `BEST_FIT` scans all ranges
+ and picks the smallest fitting one. Failure leaves allocator state unchanged.
 
  @param [&inout] self : "The allocator to allocate from"
  @param size : "The number of bytes requested; must be greater than zero"
@@ -297,7 +323,9 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 	if (size > sz::max - FreeListUsedHeader::size - effective) return mem::INVALID_ALLOC_SIZE~;
 
 	uptr eff = (uptr)effective;
-	uptr free_align = (uptr)FreeListFreeBlock::alignment;
+	FreeListFreeBlock** chosen_link = null;
+	FreeListFreeBlock* chosen_free = null;
+	FreeListFreeBlock* chosen_next = null;
 	FreeListFreeBlock** link = &self.free_head;
 	while (*link)
 	{
@@ -319,40 +347,19 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 						sz total_needed = (sz)payload_offset + size;
 						if (free_size >= total_needed)
 						{
-							sz alloc_size = allocator_split_size(
-								total_needed,
-								FreeListFreeBlock::alignment,
-								free_size,
-								FreeListFreeBlock::size
-							);
-
-							bool split = alloc_size != free_size;
-							uptr header_addr = payload_addr - (uptr)FreeListUsedHeader::size;
-							FreeListUsedHeader* header = (FreeListUsedHeader*)header_addr;
-							header.magic = FREE_LIST_BLOCK_MAGIC;
-							header.owner = self;
-							header.block_size = alloc_size;
-							header.block_offset = (sz)(header_addr - start);
-							header.requested_size = size;
-							header.in_use = true;
-							void* result = (void*)payload_addr;
-							if (split)
+							if (!self.best_fit)
 							{
-								void* rest = (void*)(start + (uptr)alloc_size);
-								sz rest_size = free_size - alloc_size;
-								*link = (FreeListFreeBlock*)rest;
-								(*link).next = free_next;
-								(*link).size = rest_size;
-								self.free_bytes -= alloc_size;
+								chosen_link = link;
+								chosen_free = free;
+								chosen_next = free_next;
+								break;
 							}
-							else
+							if (!chosen_free || free_size < chosen_free.size)
 							{
-								*link = free_next;
-								self.free_bytes -= free_size;
+								chosen_link = link;
+								chosen_free = free;
+								chosen_next = free_next;
 							}
-
-							allocator_zero_if(result, size, init_type);
-							return result;
 						}
 					}
 				}
@@ -360,7 +367,45 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 		}
 		link = &(*link).next;
 	}
-	return mem::OUT_OF_MEMORY~;
+	if (!chosen_free) return mem::OUT_OF_MEMORY~;
+
+	uptr start = (uptr)chosen_free;
+	uptr payload_addr = (start + (uptr)FreeListUsedHeader::size + eff - 1) & ~(eff - 1);
+	uptr payload_offset = payload_addr - start;
+	sz free_size = chosen_free.size;
+	sz alloc_size = allocator_split_size(
+		(sz)payload_offset + size,
+		FreeListFreeBlock::alignment,
+		free_size,
+		FreeListFreeBlock::size
+	);
+
+	bool split = alloc_size != free_size;
+	uptr header_addr = payload_addr - (uptr)FreeListUsedHeader::size;
+	FreeListUsedHeader* header = (FreeListUsedHeader*)header_addr;
+	header.magic = FREE_LIST_BLOCK_MAGIC;
+	header.owner = self;
+	header.block_size = alloc_size;
+	header.block_offset = (sz)(header_addr - start);
+	header.requested_size = size;
+	header.in_use = true;
+	void* result = (void*)payload_addr;
+	if (split)
+	{
+		void* rest = (void*)(start + (uptr)alloc_size);
+		*chosen_link = (FreeListFreeBlock*)rest;
+		(*chosen_link).next = chosen_next;
+		(*chosen_link).size = free_size - alloc_size;
+		self.free_bytes -= alloc_size;
+	}
+	else
+	{
+		*chosen_link = chosen_next;
+		self.free_bytes -= free_size;
+	}
+
+	allocator_zero_if(result, size, init_type);
+	return result;
 }
 
 <*

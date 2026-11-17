@@ -305,3 +305,58 @@ fn void freelist_fragmentation_queries_track_ranges() @test
 	assert(list.free_block_count() == 1);
 	assert(list.largest_free() == list.bytes_free());
 }
+
+fn void freelist_best_fit_picks_smallest_range() @test
+{
+	char[512] storage;
+	allocators::FreeListAllocator list;
+	list.init(storage[..]);
+	list.set_policy(allocators::FreeListPolicy.BEST_FIT);
+	sz initial_free = list.bytes_free();
+
+	// Four allocations leave a trailing remainder that is too small for
+	// another 64-byte request; releasing a and c yields free ranges of
+	// 112 bytes each plus that remainder.
+	void* a = list.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	void* b = list.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	void* c = list.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	void* d = list.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	list.release(a, false);
+	list.release(c, false);
+	assert(list.free_block_count() == 3);
+
+	// Best fit must serve the request from a's 112-byte range; the 64-byte
+	// remainder cannot fit header plus payload.
+	void* small = list.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	assert(small == a);
+	(void)d;
+	list.release(small, false);
+	list.release(b, false);
+	list.release(c, false);
+	list.release(d, false);
+	assert(list.bytes_free() == initial_free);
+	assert(list.free_block_count() == 1);
+}
+
+fn void freelist_policy_stays_correct_after_switch() @test
+{
+	char[512] storage;
+	allocators::FreeListAllocator list;
+	list.init(storage[..]);
+	sz initial_free = list.bytes_free();
+
+	void* a = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* b = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	list.release(a, false);
+	list.set_policy(allocators::FreeListPolicy.BEST_FIT);
+	void* reused = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	assert(reused == a);
+	list.release(b, false);
+	list.release(reused, false);
+	assert(list.bytes_free() == initial_free);
+	list.set_policy(allocators::FreeListPolicy.FIRST_FIT);
+	void* after = list.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	assert(after != null);
+	list.release(after, false);
+	assert(list.bytes_free() == initial_free);
+}

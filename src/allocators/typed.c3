@@ -75,10 +75,7 @@ fn Type*? TypedPool.acquire(&self, AllocInitType init_type = NO_ZERO)
  @param [&inout] self : "The pool that owns the value"
  @param [drop] value : "The value to release, or null"
 *>
-fn void TypedPool.release(&self, Type* value)
-{
-	self.pool.release(value, false);
-}
+fn void TypedPool.release(&self, Type* value) => self.pool.release(value, false);
 
 <*
  Check whether a pointer is a slot payload of this pool.

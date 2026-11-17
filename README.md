@@ -82,6 +82,42 @@ Numbers vary by machine; compare within one run rather than across runs.
 Per-allocation overhead is observable through the byte stats instead
 (`bytes_reserved` vs payload, `bytes_used` vs `bytes_free`).
 
+One reference run on my machine (64-byte requests, batches of
+64 operations, 65536-byte buffers; averages, lower is better):
+
+| Benchmark                        | Avg per batch |
+| -------------------------------- | ------------- |
+| arena acquire/release            | 1.62 us       |
+| backed arena acquire/release     | 2.26 us       |
+| free-list acquire/release        | 3.70 us       |
+| buddy acquire/release            | 11.21 us      |
+| pool acquire/release             | 2.73 us       |
+| size-class acquire/release       | 7.22 us       |
+| arena clear cycle                | 1.13 us       |
+| scratch clear cycle              | 1.57 us       |
+| free-list clear cycle            | 2.02 us       |
+| buddy clear cycle                | 2.99 us       |
+| free-list fragmented release     | 6.98 us       |
+
+## Choosing an allocator
+
+| Need                                              | Use                   |
+| ------------------------------------------------- | --------------------- |
+| Per-frame or scoped transient data                | `ScratchAllocator`    |
+| Grouped lifetimes with nested rewind              | `ArenaAllocator`      |
+| Mostly-fits buffer with occasional overflow       | `BackedArenaAllocator`|
+| One fixed size, O(1) release, stable pointers     | `PoolAllocator`       |
+| Typed slots derived from a struct                 | `TypedPool{Type}`     |
+| Mixed small sizes with bounded waste              | `SizeClassAllocator`  |
+| General variable sizes inside one buffer          | `FreeListAllocator`   |
+| Variable sizes with minimal external fragmentation| `BuddyAllocator`      |
+
+Rules of thumb: prefer the simplest allocator that covers the lifetime
+pattern; arenas and scratch beat everything on speed but cannot free
+individually in the middle; pools beat free lists when sizes are uniform;
+buddy is the safest default for unpredictable mixed sizes, at the cost of
+power-of-two rounding.
+
 ## Using `ArenaAllocator`
 
 The arena borrows its backing buffer. That buffer must remain alive for as long
@@ -283,6 +319,10 @@ list.clear(); // Discards all allocations at once.
   on failure. A range is split only when the remainder can hold a free node.
 - `release` ignores null, foreign, interior, and duplicate releases, then
   coalesces with adjacent free neighbours.
+- Selection is `FIRST_FIT` by default; `set_policy` switches to `BEST_FIT`,
+  which scans all ranges and picks the smallest fitting one. `FIRST_FIT`
+  is fastest; `BEST_FIT` leaves fewer small splinters when sizes vary
+  widely.
 - `resize` preserves the prefix. It shrinks in place, grows into an adjacent
   free range when possible, otherwise moves. Failure preserves the original.
 - `largest_free()` reports the biggest contiguous range and
