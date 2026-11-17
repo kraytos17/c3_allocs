@@ -375,3 +375,25 @@ fn void freelist_owns_rejects_interior_and_foreign() @test
 	list.release(item, false);
 	assert(!list.owns(item));
 }
+
+fn void freelist_prev_neighbour_merges_through_footer() @test
+{
+	char[512] storage;
+	allocators::FreeListAllocator list;
+	list.init(storage[..]);
+	sz initial_free = list.bytes_free();
+
+	// a and b adjacent; freeing b then a must merge backward through a's
+	// boundary footer, then absorb b's range in the same publish.
+	void* a = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* b = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* c = list.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	list.release(b, false);
+	sz free_after_b = list.bytes_free();
+	list.release(a, false);
+	assert(list.free_block_count() == 2);
+	assert(list.largest_free() >= 112);
+	list.release(c, false);
+	assert(list.bytes_free() == initial_free);
+	assert(list.free_block_count() == 1);
+}

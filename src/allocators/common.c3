@@ -102,10 +102,15 @@ fn bool allocator_checked_add(sz a, sz b, sz* out)
 }
 
 const ALLOCATOR_CANARY_BYTE = 0xC3;
+const ALLOCATOR_CANARY_WORD = 0xC3C3C3C3C3C3C3C3;
 const ALLOCATOR_POISON_BYTE = 0xAA;
 
 <*
  Fill a trailing canary region after a payload.
+
+ The fill walks 8-byte words where the region is naturally aligned and
+ handles the head and tail byte by byte, so unaligned canary starts are
+ safe without relying on `mem::set`'s alignment requirements.
 
  @param start : "The first canary byte"
  @param bytes : "The canary region byte count"
@@ -115,11 +120,29 @@ fn void allocator_fill_canary(void* start, sz bytes)
 	if (bytes <= 0) return;
 
 	char* cursor = (char*)start;
-	for (sz i = 0; i < bytes; i++) cursor[i] = (char)ALLOCATOR_CANARY_BYTE;
+	uptr base_addr = (uptr)start;
+	sz done = 0;
+	while (done < bytes && (base_addr + (uptr)done) % 8 != 0)
+	{
+		cursor[done++] = (char)ALLOCATOR_CANARY_BYTE;
+	}
+	while (done + 8 <= bytes)
+	{
+		ulong* word = (ulong*)(cursor + done);
+		*word = (ulong)ALLOCATOR_CANARY_WORD;
+		done += 8;
+	}
+	while (done < bytes)
+	{
+		cursor[done++] = (char)ALLOCATOR_CANARY_BYTE;
+	}
 }
 
 <*
  Check whether a trailing canary region is intact.
+
+ The verify reads 8-byte words where the region is naturally aligned and
+ handles the head and tail byte by byte, matching the fill layout.
 
  @param start : "The first canary byte"
  @param bytes : "The canary region byte count"
@@ -130,11 +153,47 @@ fn bool allocator_canary_intact(void* start, sz bytes)
 	if (bytes <= 0) return true;
 
 	char* cursor = (char*)start;
-	for (sz i = 0; i < bytes; i++)
+	uptr base_addr = (uptr)start;
+	sz done = 0;
+	while (done < bytes && (base_addr + (uptr)done) % 8 != 0)
 	{
-		if (cursor[i] != (char)ALLOCATOR_CANARY_BYTE) return false;
+		if (cursor[done++] != (char)ALLOCATOR_CANARY_BYTE) return false;
+	}
+	while (done + 8 <= bytes)
+	{
+		ulong* word = (ulong*)(cursor + done);
+		if (*word != (ulong)ALLOCATOR_CANARY_WORD) return false;
+		done += 8;
+	}
+	while (done < bytes)
+	{
+		if (cursor[done++] != (char)ALLOCATOR_CANARY_BYTE) return false;
 	}
 	return true;
+}
+
+<*
+ Zero a payload when the caller requested zero initialization.
+
+ Payload starts are aligned in practice, so this hits `mem::set`'s fast
+ path; a byte loop covers unaligned starts, where `mem::set` is unsafe in
+ this compiler version.
+
+ @param payload : "The payload to conditionally clear"
+ @param size : "The requested payload byte count"
+ @param init_type : "Whether the payload must be zero-initialized"
+*>
+fn void allocator_zero_if(void* payload, sz size, AllocInitType init_type)
+{
+	if (init_type != ZERO || size <= 0) return;
+	if (mem::ptr_is_aligned(payload, mem::DEFAULT_MEM_ALIGNMENT))
+	{
+		mem::set(payload, 0, (usz)size, mem::DEFAULT_MEM_ALIGNMENT);
+		return;
+	}
+
+	char* cursor = (char*)payload;
+	for (sz i = 0; i < size; i++) cursor[i] = 0;
 }
 
 <*
@@ -142,6 +201,7 @@ fn bool allocator_canary_intact(void* start, sz bytes)
 
  Test builds fill released memory so use-after-release reads are visible,
  matching the standard library's 0xAA test fills. Release builds skip this.
+ Aligned regions use `mem::set`; unaligned ones use a byte loop.
 
  @param start : "The first poisoned byte"
  @param bytes : "The region byte count"
@@ -149,6 +209,13 @@ fn bool allocator_canary_intact(void* start, sz bytes)
 fn void allocator_poison_if_testing(void* start, sz bytes)
 {
 	$if env::TESTING:
+		if (bytes <= 0) return;
+		if (mem::ptr_is_aligned(start, mem::DEFAULT_MEM_ALIGNMENT))
+		{
+			mem::set(start, ALLOCATOR_POISON_BYTE, (usz)bytes, mem::DEFAULT_MEM_ALIGNMENT);
+			return;
+		}
+
 		char* cursor = (char*)start;
 		for (sz i = 0; i < bytes; i++) cursor[i] = (char)ALLOCATOR_POISON_BYTE;
 	$endif
@@ -227,18 +294,6 @@ fn bool allocator_contains(uptr base, sz len, uptr address, sz size)
 	if (offset > (uptr)len) return false;
 	if (size > len - (sz)offset) return false;
 	return true;
-}
-
-<*
- Zero a payload when the caller requested zero initialization.
-
- @param payload : "The payload to conditionally clear"
- @param size : "The requested payload byte count"
- @param init_type : "Whether the payload must be zero-initialized"
-*>
-fn void allocator_zero_if(void* payload, sz size, AllocInitType init_type)
-{
-	if (init_type == ZERO) mem::clear(payload, size, mem::DEFAULT_MEM_ALIGNMENT);
 }
 
 <*

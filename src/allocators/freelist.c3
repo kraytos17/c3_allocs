@@ -4,16 +4,29 @@ import std::core::mem::alloc;
 import std::core::mem;
 
 const FREE_LIST_BLOCK_MAGIC @local = 0xF2EEB10C5A11;
+const FREE_LIST_NODE_MAGIC @local = 0xF2EE0C5A11F2EE;
+const FREE_LIST_FOOTER_MAGIC @local = 0xF0075A110C5AF2EE;
 
 <*
  A variable-size free-list allocator over caller-owned memory.
 
  The allocator borrows its buffer and manages variable-size blocks with
- first-fit selection, splitting on allocate and coalescing on release.
- Released neighbours are merged, so freeing all allocations restores one
- contiguous free range (minus any initial alignment offset). The buffer must
- outlive the allocator and every pointer returned by it. This allocator is
- not thread-safe. Releasing or clearing the allocator never runs destructors.
+ first-fit or best-fit selection, splitting on allocate and coalescing on
+ release. The free list is doubly linked and kept in most-recently-freed
+ order, and every free range carries a boundary footer at its end storing
+ the range size, following the classic Knuth boundary-tag design. Release
+ therefore finds and merges free neighbours in constant time by reading the
+ footer before the block and the node after it, instead of walking an
+ address-ordered list.
+
+ A free range costs 48 bytes: the 32-byte list node at its start and a
+ 16-byte footer at its end, so ranges smaller than that are consumed whole
+ rather than split. The footer is only trusted together with the node at
+ the implied range start, which makes false matches from user data
+ vanishingly unlikely. Fully freeing the allocator restores one contiguous
+ range (minus any initial alignment offset). The buffer must outlive the
+ allocator and every pointer returned by it. This allocator is not
+ thread-safe and never runs destructors.
 *>
 struct FreeListAllocator (Allocator) @mustinit
 {
@@ -24,29 +37,30 @@ struct FreeListAllocator (Allocator) @mustinit
 }
 
 <*
- Selection policy for `acquire`.
-
- FIRST FIT stops at the first range that fits: fastest, and pairs well
- with address-ordered release and coalescing. BEST FIT scans all ranges
- and picks the smallest fitting one: better for workloads with widely
- varying sizes, at the cost of a full scan on every miss.
-*>
-enum FreeListPolicy
-{
-	FIRST_FIT,
-	BEST_FIT
-}
-
-<*
- Metadata for a free range. The node lives at the start of the free range,
- so `size` is the total byte count from this node through the end of the
- range.
+ Metadata for a free range. The node lives at the start of the free range
+ and the list is doubly linked in most-recently-freed order, so unlinking
+ during a merge is constant time. The footer at the range end mirrors the
+ size and is what the next block's release reads to find this range.
 *>
 struct FreeListFreeBlock @local
 {
+	ulong magic;
 	FreeListFreeBlock* next;
+	FreeListFreeBlock* previous;
 	sz size;
 }
+
+<*
+ The boundary footer at the end of a free range. Its size lets a later
+ release of the following block find this range's start in constant time.
+*>
+struct FreeListFooter @local
+{
+	ulong magic;
+	sz size;
+}
+
+const FREE_LIST_MIN_RANGE @local = FreeListFreeBlock::size + FreeListFooter::size;
 
 <*
  Header for a live allocation. The header sits immediately before the
@@ -66,13 +80,29 @@ struct FreeListUsedHeader @local
 }
 
 <*
+ Selection policy for `acquire`.
+
+ FIRST FIT stops at the first range that fits: fastest, and pairs well
+ with the boundary-tag release path. BEST FIT scans all ranges and picks
+ the smallest fitting one, breaking ties by lower address: better for
+ workloads with widely varying sizes, at the cost of a full scan on every
+ miss.
+*>
+enum FreeListPolicy
+{
+	FIRST_FIT,
+	BEST_FIT
+}
+
+<*
  Initialize the free list over caller-owned storage.
 
  The buffer is borrowed, not copied. Its start is aligned up to the free
  block alignment; any leading bytes before that address stay reserved. When
- the usable remainder cannot hold a free node, the allocator starts empty
- and every acquisition fails until it is cleared over a larger buffer.
- Selection defaults to `FIRST_FIT`; switch with `set_policy`.
+ the usable remainder cannot hold a free node plus its footer, the
+ allocator starts empty and every acquisition fails until it is cleared
+ over a larger buffer. Selection defaults to `FIRST_FIT`; switch with
+ `set_policy`.
 
  @param [&out] self : "The allocator to initialize"
  @param storage : "The caller-owned buffer managed by this allocator"
@@ -84,7 +114,7 @@ fn FreeListAllocator* FreeListAllocator.init(&self, char[] storage)
 	self.free_head = null;
 	self.free_bytes = 0;
 	self.best_fit = false;
-	if (storage.len >= FreeListFreeBlock::size)
+	if (storage.len >= FREE_LIST_MIN_RANGE && storage.ptr)
 	{
 		uptr base_addr = (uptr)storage.ptr;
 		uptr block_align = (uptr)FreeListFreeBlock::alignment;
@@ -92,13 +122,19 @@ fn FreeListAllocator* FreeListAllocator.init(&self, char[] storage)
 		if (aligned_addr >= base_addr)
 		{
 			sz offset = (sz)(aligned_addr - base_addr);
-			if (offset <= storage.len && storage.len - offset >= FreeListFreeBlock::size)
+			if (offset <= storage.len && storage.len - offset >= FREE_LIST_MIN_RANGE)
 			{
-				FreeListFreeBlock* block = (FreeListFreeBlock*)aligned_addr;
-				block.next = null;
-				block.size = storage.len - offset;
-				self.free_head = block;
-				self.free_bytes = block.size;
+				sz range = storage.len - offset;
+				FreeListFreeBlock* node = (FreeListFreeBlock*)aligned_addr;
+				node.magic = FREE_LIST_NODE_MAGIC;
+				node.next = null;
+				node.previous = null;
+				node.size = range;
+				self.free_head = node;
+				FreeListFooter* footer = (FreeListFooter*)(aligned_addr + (uptr)range - (uptr)FreeListFooter::size);
+				footer.magic = FREE_LIST_FOOTER_MAGIC;
+				footer.size = range;
+				self.free_bytes = range;
 			}
 		}
 	}
@@ -162,8 +198,8 @@ fn sz FreeListAllocator.free_block_count(&self)
  Return the largest single contiguous free range in bytes.
 
  Allocations larger than this fail even when `bytes_free` is bigger,
- because first-fit selection cannot span ranges. After freeing everything,
- this equals `bytes_free`.
+ because selection cannot span ranges. After freeing everything, this
+ equals `bytes_free`.
 
  @param [&in] self : "The allocator to query"
  @return "The largest free range byte count, or zero when full"
@@ -193,35 +229,115 @@ fn sz FreeListAllocator.largest_free(&self)
 fn bool FreeListAllocator.owns(&self, void* pointer) => freelist_used_header((FreeListAllocator*)self, pointer) != null;
 
 <*
- Discard all allocations and restore one contiguous free range.
+ Set the range selection policy.
 
- The borrowed buffer is retained. Pointers returned before the call must
- not be used afterwards. No memory is cleared and no destructors run.
-
- @param [&inout] self : "The allocator to clear"
+ @param [&inout] self : "The allocator to retune"
+ @param policy : "`FIRST_FIT` or `BEST_FIT`"
 *>
-fn void FreeListAllocator.clear(&self)
+fn void FreeListAllocator.set_policy(&self, FreeListPolicy policy) => self.best_fit = policy == BEST_FIT;
+
+<*
+ Unlink a free range from the doubly linked free list.
+
+ @param [&inout] self : "The allocator owning the free list"
+ @param block : "The range node to unlink"
+*>
+fn void freelist_unlink(FreeListAllocator* self, FreeListFreeBlock* block) @local
 {
-	self.free_head = null;
-	self.free_bytes = 0;
-	if (self.data.len >= FreeListFreeBlock::size && self.data.ptr)
+	FreeListFreeBlock* next = block.next;
+	FreeListFreeBlock* previous = block.previous;
+	if (previous)
 	{
-		uptr base_addr = (uptr)self.data.ptr;
-		uptr block_align = (uptr)FreeListFreeBlock::alignment;
-		uptr aligned_addr = (base_addr + block_align - 1) & ~(block_align - 1);
-		if (aligned_addr >= base_addr)
+		previous.next = next;
+	}
+	else
+	{
+		self.free_head = next;
+	}
+	if (next)
+	{
+		next.previous = previous;
+	}
+}
+
+<*
+ Push a free range onto the head of the free list.
+
+ @param [&inout] self : "The allocator owning the free list"
+ @param block : "The initialized range node to push"
+*>
+fn void freelist_push(FreeListAllocator* self, FreeListFreeBlock* block) @local
+{
+	block.next = self.free_head;
+	block.previous = null;
+	if (self.free_head) self.free_head.previous = block;
+	self.free_head = block;
+}
+
+<*
+ Publish a free range: merge with free neighbours through the boundary
+ tags, then link the merged range with its node and footer.
+
+ The backward neighbour is found through the footer preceding the range
+ and validated against the node at the implied start; the forward
+ neighbour is checked through the node magic at the range end. Both
+ neighbours are unlinked before the merged range is pushed, so every
+ release is constant time regardless of list length.
+
+ @param [&inout] self : "The allocator publishing the range"
+ @param start : "The start of the newly freed range"
+ @param size : "The byte count of the newly freed range"
+*>
+fn void freelist_publish(FreeListAllocator* self, void* start, sz size) @local
+{
+	uptr base_addr = (uptr)self.data.ptr;
+	uptr buffer_end = base_addr + (uptr)self.data.len;
+	uptr merged_start = (uptr)start;
+	sz merged_size = size;
+	if (merged_start >= base_addr + (uptr)FreeListFooter::size)
+	{
+		FreeListFooter* footer = (FreeListFooter*)(merged_start - (uptr)FreeListFooter::size);
+		if (footer.magic == FREE_LIST_FOOTER_MAGIC)
 		{
-			sz offset = (sz)(aligned_addr - base_addr);
-			if (offset <= self.data.len && self.data.len - offset >= FreeListFreeBlock::size)
+			uptr previous_start = merged_start - (uptr)footer.size;
+			FreeListFreeBlock* previous = (FreeListFreeBlock*)previous_start;
+			if (previous.magic == FREE_LIST_NODE_MAGIC && previous.size == footer.size)
 			{
-				FreeListFreeBlock* block = (FreeListFreeBlock*)aligned_addr;
-				block.next = null;
-				block.size = self.data.len - offset;
-				self.free_head = block;
-				self.free_bytes = block.size;
+				freelist_unlink(self, previous);
+				merged_start = previous_start;
+				merged_size += footer.size;
+				// The merged range's own footer now lives at its new end;
+				// the previous range's footer is interior stale data.
+				footer.magic = 0;
+				footer.size = 0;
 			}
 		}
 	}
+
+	uptr merged_end = merged_start + (uptr)merged_size;
+	if (merged_end + (uptr)FreeListFreeBlock::size <= buffer_end)
+	{
+		FreeListFreeBlock* next = (FreeListFreeBlock*)merged_end;
+		if (next.magic == FREE_LIST_NODE_MAGIC)
+		{
+			freelist_unlink(self, next);
+			// The absorbed range's footer is interior stale data now.
+			FreeListFooter* absorbed = (FreeListFooter*)(merged_end + (uptr)next.size - (uptr)FreeListFooter::size);
+			absorbed.magic = 0;
+			absorbed.size = 0;
+			merged_size += next.size;
+		}
+	}
+
+	FreeListFreeBlock* node = (FreeListFreeBlock*)merged_start;
+	node.magic = FREE_LIST_NODE_MAGIC;
+	node.size = merged_size;
+	node.next = null;
+	node.previous = null;
+	freelist_push(self, node);
+	FreeListFooter* footer = (FreeListFooter*)(merged_start + (uptr)merged_size - (uptr)FreeListFooter::size);
+	footer.magic = FREE_LIST_FOOTER_MAGIC;
+	footer.size = merged_size;
 }
 
 <*
@@ -259,62 +375,15 @@ fn FreeListUsedHeader* freelist_used_header(FreeListAllocator* self, void* point
 }
 
 <*
- Insert a free range into the address-ordered free list and coalesce neighbours.
-
- The caller accounts `size` in `free_bytes` before calling. Adjacent ranges
- before and after the inserted range are merged when they touch exactly.
-
- @param [&inout] self : "The allocator receiving the free range"
- @param start : "The start of the range to insert"
- @param size : "The byte count of the range to insert"
-*>
-fn void freelist_insert_coalesce(FreeListAllocator* self, void* start, sz size) @local
-{
-	FreeListFreeBlock* node = (FreeListFreeBlock*)start;
-	node.next = null;
-	node.size = size;
-	uptr node_addr = (uptr)start;
-	FreeListFreeBlock** link = &self.free_head;
-	while (*link && (uptr)*link < node_addr)
-	{
-		link = &(*link).next;
-	}
-
-	node.next = *link;
-	*link = node;
-	if (node.next && node_addr + (uptr)node.size == (uptr)node.next)
-	{
-		node.size += node.next.size;
-		node.next = node.next.next;
-	}
-	if (link != &self.free_head)
-	{
-		FreeListFreeBlock* prev = self.free_head;
-		while (prev && prev.next != node) prev = prev.next;
-		if (prev && (uptr)prev + (uptr)prev.size == node_addr)
-		{
-			prev.size += node.size;
-			prev.next = node.next;
-		}
-	}
-}
-
-<*
- Set the range selection policy.
-
- @param [&inout] self : "The allocator to retune"
- @param policy : "`FIRST_FIT` or `BEST_FIT`"
-*>
-fn void FreeListAllocator.set_policy(&self, FreeListPolicy policy) => self.best_fit = policy == BEST_FIT;
-
-<*
  Acquire a variable-size block using the configured selection policy.
 
  The payload meets `alignment`, or the default C3 alignment when zero.
  `ZERO` clears only the requested payload bytes. A free range is split when
- the remainder can still hold a free node; otherwise the whole range is used.
- `FIRST_FIT` stops at the first fitting range; `BEST_FIT` scans all ranges
- and picks the smallest fitting one. Failure leaves allocator state unchanged.
+ the remainder can still hold a free node and its footer; otherwise the
+ whole range is used, consuming its boundary footer. `FIRST_FIT` stops at
+ the first fitting range in most-recently-freed order; `BEST_FIT` scans all
+ ranges and picks the smallest fitting one, breaking ties by lower
+ address. Failure leaves allocator state unchanged.
 
  @param [&inout] self : "The allocator to allocate from"
  @param size : "The number of bytes requested; must be greater than zero"
@@ -335,16 +404,12 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 	if (size > sz::max - FreeListUsedHeader::size - effective) return mem::INVALID_ALLOC_SIZE~;
 
 	uptr eff = (uptr)effective;
-	FreeListFreeBlock** chosen_link = null;
-	FreeListFreeBlock* chosen_free = null;
-	FreeListFreeBlock* chosen_next = null;
-	FreeListFreeBlock** link = &self.free_head;
-	while (*link)
+	FreeListFreeBlock* chosen = null;
+	FreeListFreeBlock* cursor = self.free_head;
+	while (cursor)
 	{
-		FreeListFreeBlock* free = *link;
-		uptr start = (uptr)free;
-		sz free_size = free.size;
-		FreeListFreeBlock* free_next = free.next;
+		uptr start = (uptr)cursor;
+		sz free_size = cursor.size;
 		if (free_size >= FreeListUsedHeader::size)
 		{
 			uptr header_min = start + (uptr)FreeListUsedHeader::size;
@@ -361,35 +426,37 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 						{
 							if (!self.best_fit)
 							{
-								chosen_link = link;
-								chosen_free = free;
-								chosen_next = free_next;
+								chosen = cursor;
 								break;
 							}
-							if (!chosen_free || free_size < chosen_free.size)
+							if (!chosen || free_size < chosen.size
+								|| (free_size == chosen.size && start < (uptr)chosen))
 							{
-								chosen_link = link;
-								chosen_free = free;
-								chosen_next = free_next;
+								chosen = cursor;
 							}
 						}
 					}
 				}
 			}
 		}
-		link = &(*link).next;
+		cursor = cursor.next;
 	}
-	if (!chosen_free) return mem::OUT_OF_MEMORY~;
+	if (!chosen) return mem::OUT_OF_MEMORY~;
+	freelist_unlink(self, chosen);
+	// The chosen range's node bytes would otherwise linger inside the used
+	// block and later reads (a release's forward check) could mistake them
+	// for a live free node.
+	chosen.magic = 0;
 
-	uptr start = (uptr)chosen_free;
+	uptr start = (uptr)chosen;
 	uptr payload_addr = (start + (uptr)FreeListUsedHeader::size + eff - 1) & ~(eff - 1);
 	uptr payload_offset = payload_addr - start;
-	sz free_size = chosen_free.size;
+	sz free_size = chosen.size;
 	sz alloc_size = allocator_split_size(
 		(sz)payload_offset + size,
 		FreeListFreeBlock::alignment,
 		free_size,
-		FreeListFreeBlock::size
+		FREE_LIST_MIN_RANGE
 	);
 
 	bool split = alloc_size != free_size;
@@ -404,19 +471,30 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 	void* result = (void*)payload_addr;
 	if (split)
 	{
+		// The consumed range's footer at the old end is stale; the
+		// remainder gets a fresh one at the same address.
+		FreeListFooter* old_footer = (FreeListFooter*)(start + (uptr)free_size - (uptr)FreeListFooter::size);
+		old_footer.magic = 0;
+		old_footer.size = 0;
 		void* rest = (void*)(start + (uptr)alloc_size);
-		*chosen_link = (FreeListFreeBlock*)rest;
-		(*chosen_link).next = chosen_next;
-		(*chosen_link).size = free_size - alloc_size;
+		freelist_publish(self, rest, free_size - alloc_size);
 		self.free_bytes -= alloc_size;
 	}
 	else
 	{
-		*chosen_link = chosen_next;
+		// The consumed range's boundary footer would otherwise linger as
+		// stale data inside the used block. Only clear it when it does not
+		// overlap the used header's own tail fields.
+		if (free_size >= (sz)FreeListFooter::size && free_size - (sz)FreeListFooter::size >= (sz)payload_offset)
+		{
+			FreeListFooter* stale = (FreeListFooter*)(start + (uptr)free_size - (uptr)FreeListFooter::size);
+			stale.magic = 0;
+			stale.size = 0;
+		}
 		self.free_bytes -= free_size;
 	}
 
-	allocator_fill_canary((char*)result + size, (sz)(start + (uptr)alloc_size) - ((sz)payload_addr + size));
+	allocator_fill_canary((char*)result + size, (sz)((start + (uptr)alloc_size) - (payload_addr + (uptr)size)));
 	allocator_zero_if(result, size, init_type);
 	return result;
 }
@@ -426,11 +504,12 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 
  The common prefix is preserved. A block grows in place when the payload
  already meets the requested alignment and either fits in its current range
- or can absorb an immediately adjacent free range. It shrinks in place when
- the smaller payload fits, splitting the tail when the remainder can hold a
- free node. Otherwise a replacement is acquired first and the old contents
- are copied; the old block is released only after the copy succeeds. On any
- failure the old block and allocator state remain unchanged.
+ or can absorb an immediately adjacent free range, which the boundary node
+ at the block end identifies in constant time. It shrinks in place when the
+ smaller payload fits, publishing the tail as a free range. Otherwise a
+ replacement is acquired first and the old contents are copied; the old
+ block is released only after the copy succeeds. On any failure the old
+ block and allocator state remain unchanged.
 
  @param [&inout] self : "The allocator that owns the block"
  @param [drop] old_pointer : "The payload pointer to resize"
@@ -465,7 +544,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 		{
 			assert(allocator_canary_intact(
 				(char*)old_pointer + old_requested,
-				(sz)(block_start + (uptr)block_size) - ((sz)old_addr + old_requested)
+				(sz)((block_start + (uptr)block_size) - ((uptr)old_addr + (uptr)old_requested))
 			), "Free-list trailing canary was corrupted before resize.");
 
 			sz total_needed = (sz)payload_offset + new_size;
@@ -473,7 +552,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 				total_needed,
 				FreeListFreeBlock::alignment,
 				block_size,
-				FreeListFreeBlock::size
+				FREE_LIST_MIN_RANGE
 			);
 			if (alloc_size != block_size)
 			{
@@ -482,7 +561,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 				header.block_size = alloc_size;
 				header.requested_size = new_size;
 				self.free_bytes += tail_size;
-				freelist_insert_coalesce(self, tail, tail_size);
+				freelist_publish(self, tail, tail_size);
 			}
 			else
 			{
@@ -491,39 +570,36 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 
 			allocator_fill_canary(
 				(char*)old_pointer + new_size,
-				(sz)(block_start + (uptr)header.block_size) - ((sz)old_addr + new_size)
+				(sz)((block_start + (uptr)header.block_size) - ((uptr)old_addr + (uptr)new_size))
 			);
 			return old_pointer;
 		}
 
 		uptr block_end = block_start + (uptr)block_size;
-		FreeListFreeBlock** link = &self.free_head;
-		while (*link)
+		uptr buffer_end = (uptr)self.data.ptr + (uptr)self.data.len;
+		if (block_end + (uptr)FreeListFreeBlock::size <= buffer_end)
 		{
-			FreeListFreeBlock* free = *link;
-			uptr free_start = (uptr)free;
-			if (free_start == block_end)
+			FreeListFreeBlock* next = (FreeListFreeBlock*)block_end;
+			if (next.magic == FREE_LIST_NODE_MAGIC && block_size <= sz::max - next.size)
 			{
-				sz combined = block_size + free.size;
-				if (combined >= block_size && payload_offset <= (uptr)combined
-					&& combined - (sz)payload_offset >= new_size)
+				sz combined = block_size + next.size;
+				if (combined - (sz)payload_offset >= new_size)
 				{
 					assert(allocator_canary_intact(
 						(char*)old_pointer + old_requested,
-						(sz)(block_start + (uptr)block_size) - ((sz)old_addr + old_requested)
+						(sz)((block_start + (uptr)block_size) - ((uptr)old_addr + (uptr)old_requested))
 					), "Free-list trailing canary was corrupted before resize.");
 
+					freelist_unlink(self, next);
+					self.free_bytes -= next.size;
 					sz total_needed = (sz)payload_offset + new_size;
 					sz alloc_size = allocator_split_size(
 						total_needed,
 						FreeListFreeBlock::alignment,
 						combined,
-						FreeListFreeBlock::size
+						FREE_LIST_MIN_RANGE
 					);
 
-					FreeListFreeBlock* next = free.next;
-					*link = next;
-					self.free_bytes -= free.size;
 					if (alloc_size != combined)
 					{
 						void* tail = (void*)(block_start + (uptr)alloc_size);
@@ -531,7 +607,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 						header.block_size = alloc_size;
 						header.requested_size = new_size;
 						self.free_bytes += tail_size;
-						freelist_insert_coalesce(self, tail, tail_size);
+						freelist_publish(self, tail, tail_size);
 					}
 					else
 					{
@@ -541,14 +617,11 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 
 					allocator_fill_canary(
 						(char*)old_pointer + new_size,
-						(sz)(block_start + (uptr)header.block_size) - ((sz)old_addr + new_size)
+						(sz)((block_start + (uptr)header.block_size) - ((uptr)old_addr + (uptr)new_size))
 					);
 					return old_pointer;
 				}
-				break;
 			}
-			if (free_start > block_end) break;
-			link = &(*link).next;
 		}
 	}
 
@@ -565,8 +638,8 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 <*
  Release a block acquired from this allocator.
 
- The range is inserted back into the address-ordered free list and merged
- with adjacent free neighbours. Null, foreign, interior, and duplicate
+ The range is published through its boundary tags, merging with free
+ neighbours in constant time. Null, foreign, interior, and duplicate
  releases are ignored. The `aligned` argument satisfies the Allocator
  interface; alignment is recovered from the allocation header.
 
@@ -596,7 +669,7 @@ fn void FreeListAllocator.release(&self, void* old_pointer, bool aligned) @dynam
 	header.in_use = false;
 	header.magic = 0;
 	self.free_bytes += block_size;
-	freelist_insert_coalesce(self, (void*)block_start, block_size);
+	freelist_publish(self, (void*)block_start, block_size);
 }
 
 <*
@@ -616,4 +689,42 @@ fn bool FreeListAllocator.canary_intact(&self, void* pointer)
 		(char*)pointer + header.requested_size,
 		(sz)((block_start + (uptr)header.block_size) - ((uptr)pointer + (uptr)header.requested_size))
 	);
+}
+
+<*
+ Discard all allocations and restore one contiguous free range.
+
+ The borrowed buffer is retained. Pointers returned before the call must
+ not be used afterwards. No memory is cleared and no destructors run.
+
+ @param [&inout] self : "The allocator to clear"
+*>
+fn void FreeListAllocator.clear(&self)
+{
+	self.free_head = null;
+	self.free_bytes = 0;
+	if (self.data.len >= FREE_LIST_MIN_RANGE && self.data.ptr)
+	{
+		uptr base_addr = (uptr)self.data.ptr;
+		uptr block_align = (uptr)FreeListFreeBlock::alignment;
+		uptr aligned_addr = (base_addr + block_align - 1) & ~(block_align - 1);
+		if (aligned_addr >= base_addr)
+		{
+			sz offset = (sz)(aligned_addr - base_addr);
+			if (offset <= self.data.len && self.data.len - offset >= FREE_LIST_MIN_RANGE)
+			{
+				sz range = self.data.len - offset;
+				FreeListFreeBlock* node = (FreeListFreeBlock*)aligned_addr;
+				node.magic = FREE_LIST_NODE_MAGIC;
+				node.next = null;
+				node.previous = null;
+				node.size = range;
+				self.free_head = node;
+				FreeListFooter* footer = (FreeListFooter*)(aligned_addr + (uptr)range - (uptr)FreeListFooter::size);
+				footer.magic = FREE_LIST_FOOTER_MAGIC;
+				footer.size = range;
+				self.free_bytes = range;
+			}
+		}
+	}
 }

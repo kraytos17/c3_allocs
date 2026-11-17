@@ -115,3 +115,31 @@ fn void pool_resize_recanaries_after_shrink() @test
 	shrunk[8] = 0xC3;
 	pool.release(shrunk, false);
 }
+
+fn void pool_canary_survives_word_boundaries() @test
+{
+	char[512] storage;
+	allocators::PoolAllocator pool;
+	pool.init(storage[..], 64);
+
+	// acquire(24) leaves a 40-byte canary starting 8-byte aligned from the
+	// 16-aligned payload: five whole words, no head or tail bytes.
+	char* item = pool.acquire(24, alloc::AllocInitType.NO_ZERO)!!;
+	assert(pool.canary_intact(item));
+	for (sz i = 24; i < 64; i++) item[i] = 0xC3;
+	assert(pool.canary_intact(item));
+	item[24] = 0x00; // First word byte.
+	assert(!pool.canary_intact(item));
+	item[24] = 0xC3;
+	item[31] = 0x00; // Last byte of the first word.
+	assert(!pool.canary_intact(item));
+	item[31] = 0xC3;
+	item[40] = 0x00; // A later word.
+	assert(!pool.canary_intact(item));
+	item[40] = 0xC3;
+	item[63] = 0x00; // Last canary byte.
+	assert(!pool.canary_intact(item));
+	item[63] = 0xC3;
+	assert(pool.canary_intact(item));
+	pool.release(item, false);
+}

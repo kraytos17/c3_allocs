@@ -104,19 +104,19 @@ One reference run on my machine (64-byte requests unless noted, batches of
 | ------------------------------------ | ------------- |
 | arena acquire/release                | 0.35 us       |
 | backed arena acquire/release         | 0.50 us       |
-| pool acquire/release                 | 1.21 us       |
-| free-list first-fit acquire/release  | 0.70 us       |
-| free-list best-fit acquire/release   | 0.75 us       |
-| tracking over free-list acquire/release | 2.42 us    |
-| size-class acquire/release           | 1.30 us       |
-| buddy acquire/release                | 1.48 us       |
-| bitmap buddy acquire/release         | 3.29 us       |
-| bitmap buddy 16-byte acquire/release | 3.71 us       |
-| arena clear cycle                    | 0.27 us       |
-| scratch clear cycle                  | 0.27 us       |
-| free-list clear cycle                | 0.50 us       |
-| buddy clear cycle                    | 0.61 us       |
-| free-list fragmented release         | 1.26 us       |
+| pool acquire/release                 | 0.77 us       |
+| free-list first-fit acquire/release  | 0.96 us       |
+| free-list best-fit acquire/release   | 0.96 us       |
+| tracking over free-list acquire/release | 2.63 us    |
+| size-class acquire/release           | 1.51 us       |
+| buddy acquire/release                | 1.60 us       |
+| bitmap buddy acquire/release         | 3.34 us       |
+| bitmap buddy 16-byte acquire/release | 3.79 us       |
+| arena clear cycle                    | 0.25 us       |
+| scratch clear cycle                  | 0.31 us       |
+| free-list clear cycle                | 0.59 us       |
+| buddy clear cycle                    | 0.67 us       |
+| free-list fragmented release         | 0.98 us       |
 
 The numbers are from an `-O2` build (`make bench` now passes `-O2` to the
 compiler); auto-vectorization pays off across the board. The bitmap buddy
@@ -355,20 +355,30 @@ list.clear(); // Discards all allocations at once.
 ### Free-list behavior and constraints
 
 - The buffer is borrowed; it must outlive the allocator and its allocations.
+- The free list is doubly linked in most-recently-freed order, and every
+  free range carries a 16-byte boundary footer at its end, following the
+  classic Knuth boundary-tag design. Release finds and merges free
+  neighbours in constant time, so it stays fast no matter how fragmented
+  the buffer is. A free range costs 48 bytes (node plus footer), and
+  ranges smaller than that are consumed whole rather than split.
 - `capacity()` reports the borrowed length, `bytes_free()` reports free
   ranges, and `bytes_used()` reports borrowed bytes not currently free.
   `largest_free()` reports the biggest contiguous range and
   `free_block_count()` reports how many ranges exist.
 - `acquire` aligns payloads, supports `ZERO` init, and leaves state unchanged
-  on failure. A range is split only when the remainder can hold a free node.
+  on failure. A range is split only when the remainder can hold a free node
+  plus its footer.
 - `release` ignores null, foreign, interior, and duplicate releases, then
-  coalesces with adjacent free neighbours.
+  coalesces with adjacent free neighbours through the boundary tags. The
+  footer is only trusted together with the node at the implied range
+  start, so forged footers in user data do not corrupt the list.
 - Selection is `FIRST_FIT` by default; `set_policy` switches to `BEST_FIT`,
-  which scans all ranges and picks the smallest fitting one. `FIRST_FIT`
-  is fastest; `BEST_FIT` leaves fewer small splinters when sizes vary
-  widely.
+  which scans all ranges and picks the smallest fitting one, breaking ties
+  by lower address. `FIRST_FIT` is fastest; `BEST_FIT` leaves fewer small
+  splinters when sizes vary widely.
 - `resize` preserves the prefix. It shrinks in place, grows into an adjacent
-  free range when possible, otherwise moves. Failure preserves the original.
+  free range when possible (identified by the boundary node in constant
+  time), otherwise moves. Failure preserves the original.
 - `largest_free()` reports the biggest contiguous range and
   `free_block_count()` how many ranges exist. Allocations larger than
   `largest_free` fail even when `bytes_free` is bigger.
