@@ -44,9 +44,6 @@ struct SizeClassAllocator (Allocator) @mustinit
 *>
 fn SizeClassAllocator* SizeClassAllocator.init(&self, char[][] buffers, sz[] block_sizes, sz alignment = 0)
 {
-	// Validated by the runtime guard below, not assert/contract: those
-	// would let the optimizer discard the guard at -O2. A rejected init
-	// configures zero classes, so every acquisition fails cleanly.
 	if (buffers.len != block_sizes.len || buffers.len <= 0 || buffers.len > SIZE_CLASS_MAX
 		|| !allocator_valid_alignment(
 		alignment
@@ -58,6 +55,7 @@ fn SizeClassAllocator* SizeClassAllocator.init(&self, char[][] buffers, sz[] blo
 		{
 			empty_pools[i].init(empty_storage[..], 1, 0);
 		}
+
 		self.pools = empty_pools;
 		self.num_classes = 0;
 		return self;
@@ -98,8 +96,6 @@ fn SizeClassAllocator* SizeClassAllocator.init(&self, char[][] buffers, sz[] blo
 *>
 fn SizeClassAllocator* SizeClassAllocator.init_preset(&self, char[] storage, sz class_count, sz alignment = 0)
 {
-	// Validated by the runtime guard below, not assert/contract: those
-	// would let the optimizer discard the guard at -O2.
 	if (class_count < 1 || class_count > SIZE_CLASS_MAX || !allocator_valid_alignment(alignment))
 	{
 		PoolAllocator[SIZE_CLASS_MAX] empty_pools;
@@ -108,6 +104,7 @@ fn SizeClassAllocator* SizeClassAllocator.init_preset(&self, char[] storage, sz 
 		{
 			empty_pools[i].init(empty_storage[..], 1, 0);
 		}
+
 		self.pools = empty_pools;
 		self.num_classes = 0;
 		return self;

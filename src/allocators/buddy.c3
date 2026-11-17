@@ -483,6 +483,7 @@ fn bool BuddyAllocator.debug_verify(&self)
 	{
 		sz block_size = ((sz)BUDDY_MIN_BLOCK << order);
 		if (block_size <= 0 || block_size > self.region_size) return false;
+
 		sz cap = self.region_size / block_size + 1;
 		sz count = 0;
 		BuddyFree* block = self.free_heads[order];
@@ -490,12 +491,14 @@ fn bool BuddyAllocator.debug_verify(&self)
 		{
 			count++;
 			if (count > cap) return false;
+
 			uptr addr = (uptr)block;
 			if (addr < self.region_base) return false;
 			if (addr > uptr::max - (uptr)block_size) return false;
 			if (addr + (uptr)block_size > region_end) return false;
 			if ((addr - self.region_base) % (uptr)block_size != 0) return false;
 			if (sum > self.region_size - block_size) return false;
+
 			sum += block_size;
 			block = block.next;
 		}

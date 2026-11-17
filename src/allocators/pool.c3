@@ -49,9 +49,6 @@ struct PoolSlot @local
 *>
 fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz alignment = 0)
 {
-	// Validated by an explicit guard, not assert/contract: those would let
-	// the optimizer discard the guard at -O2. An invalid init leaves an
-	// empty pool, so every acquisition fails cleanly.
 	if (block_size <= 0 || !allocator_valid_alignment(alignment))
 	{
 		self.data = storage;
@@ -65,6 +62,7 @@ fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz al
 		self.free_head = null;
 		return self;
 	}
+
 	alignment = allocator_effective_alignment_min(alignment, PoolSlot::alignment);
 	assert(mem::is_valid_alignment(alignment), "Effective pool alignment must be valid.");
 
@@ -219,7 +217,6 @@ fn void*? PoolAllocator.resize(&self, void* old_pointer, sz new_size, sz alignme
 
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
 	if (!slot || !slot.in_use) return mem::INVALID_ALLOC_SIZE~;
-
 	// A corrupted canary fails the resize and preserves the block.
 	if (!allocator_canary_intact(
 		(char*)old_pointer + slot.requested_size,
@@ -330,8 +327,10 @@ fn bool PoolAllocator.debug_verify(&self)
 	{
 		count++;
 		if (count > self.free_count) return false;
+
 		uptr addr = (uptr)slot;
 		if (addr < first_addr) return false;
+
 		uptr displacement = addr - first_addr;
 		if (displacement % (uptr)self.slot_stride != 0) return false;
 		if (displacement / (uptr)self.slot_stride >= (uptr)self.slot_count) return false;

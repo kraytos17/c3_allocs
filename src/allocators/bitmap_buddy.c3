@@ -665,6 +665,7 @@ fn bool BitmapBuddyAllocator.debug_verify(&self)
 			if (self.free_heads[order] != null || self.free_counts[order] != 0) return false;
 			continue;
 		}
+
 		sz nblock = self.managed_bytes / block_size;
 		sz count = 0;
 		BitmapBuddyFree* block = self.free_heads[order];
@@ -675,14 +676,17 @@ fn bool BitmapBuddyAllocator.debug_verify(&self)
 			{
 				return false;
 			}
+
 			uptr addr = (uptr)block;
 			if (addr < self.buddy_base) return false;
 			if (addr > uptr::max - (uptr)block_size) return false;
 			if (addr + (uptr)block_size > managed_end) return false;
 			if ((addr - self.buddy_base) % (uptr)block_size != 0) return false;
+
 			sz index = (sz)((addr - self.buddy_base) / (uptr)block_size);
 			if (bitmap_buddy_bit(self.alloc_bits[order], index)) return false;
 			if (sum > self.managed_bytes - block_size) return false;
+
 			sum += block_size;
 			block = block.next;
 		}
