@@ -33,23 +33,34 @@ struct SizeClassAllocator (Allocator) @mustinit
  `block_sizes`, exactly as `PoolAllocator.init` would. The buffers and the
  size table are borrowed, not copied. Every size must be positive and the
  two arrays must have equal, non-zero length within `SIZE_CLASS_MAX`.
+ Invalid configurations leave zero classes configured, so every
+ acquisition fails cleanly instead of indexing out of bounds.
 
  @param [&out] self : "The dispatcher to initialize"
  @param buffers : "One borrowed buffer per size class"
- @param block_sizes : "The maximum payload size per class"
+ @param block_sizes : "The maximum payload size per class; every size must be positive"
  @param alignment : "The maximum supported alignment for all classes, or zero for default"
  @return "A pointer to the initialized dispatcher"
- @require buffers.len == block_sizes.len : "Each class needs one buffer and one size"
- @require buffers.len > 0 && buffers.len <= SIZE_CLASS_MAX : "Class count out of range"
 *>
 fn SizeClassAllocator* SizeClassAllocator.init(&self, char[][] buffers, sz[] block_sizes, sz alignment = 0)
 {
-	assert(buffers.len == block_sizes.len, "Each size class needs one buffer and one size.");
-	assert(buffers.len > 0 && buffers.len <= SIZE_CLASS_MAX, "Size class count out of range.");
-	assert(allocator_valid_alignment(alignment), "Size class alignment must be valid.");
-	for (sz i = 0; i < block_sizes.len; i++)
+	// Validated by the runtime guard below, not assert/contract: those
+	// would let the optimizer discard the guard at -O2. A rejected init
+	// configures zero classes, so every acquisition fails cleanly.
+	if (buffers.len != block_sizes.len || buffers.len <= 0 || buffers.len > SIZE_CLASS_MAX
+		|| !allocator_valid_alignment(
+		alignment
+	))
 	{
-		assert(block_sizes[i] > 0, "Size class block size must be positive.");
+		PoolAllocator[SIZE_CLASS_MAX] empty_pools;
+		char[1] empty_storage;
+		for (sz i = 0; i < SIZE_CLASS_MAX; i++)
+		{
+			empty_pools[i].init(empty_storage[..], 1, 0);
+		}
+		self.pools = empty_pools;
+		self.num_classes = 0;
+		return self;
 	}
 
 	sz count = buffers.len;
@@ -84,12 +95,23 @@ fn SizeClassAllocator* SizeClassAllocator.init(&self, char[][] buffers, sz[] blo
  @param class_count : "How many size classes to configure, 1..SIZE_CLASS_MAX"
  @param alignment : "The maximum supported alignment for all classes, or zero for default"
  @return "A pointer to the initialized dispatcher"
- @require class_count >= 1 && class_count <= SIZE_CLASS_MAX : "Class count out of range"
 *>
 fn SizeClassAllocator* SizeClassAllocator.init_preset(&self, char[] storage, sz class_count, sz alignment = 0)
 {
-	assert(class_count >= 1 && class_count <= SIZE_CLASS_MAX, "Size class count out of range.");
-	assert(allocator_valid_alignment(alignment), "Size class alignment must be valid.");
+	// Validated by the runtime guard below, not assert/contract: those
+	// would let the optimizer discard the guard at -O2.
+	if (class_count < 1 || class_count > SIZE_CLASS_MAX || !allocator_valid_alignment(alignment))
+	{
+		PoolAllocator[SIZE_CLASS_MAX] empty_pools;
+		char[1] empty_storage;
+		for (sz i = 0; i < SIZE_CLASS_MAX; i++)
+		{
+			empty_pools[i].init(empty_storage[..], 1, 0);
+		}
+		self.pools = empty_pools;
+		self.num_classes = 0;
+		return self;
+	}
 
 	sz share = storage.len / class_count;
 	char[][SIZE_CLASS_MAX] slices;

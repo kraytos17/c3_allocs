@@ -24,6 +24,9 @@ jobs:
       - name: Check formatting, tests, and build
         run: make check
 
+      - name: Run tests at O2
+        run: c3c test -O2
+
       - name: Run benchmarks
         timeout-minutes: 20
         run: make bench

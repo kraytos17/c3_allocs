@@ -37,19 +37,34 @@ struct PoolSlot @local
  maximum supported alignment; it is raised as needed to satisfy C3's default
  alignment and the alignment required by the slot metadata. The buffer is
  divided into as many whole slots as fit; any trailing remainder is unused.
+ Sizes and alignments are validated at runtime: invalid ones leave the
+ pool empty, so every acquisition fails cleanly instead of corrupting
+ the slot math.
 
  @param [&out] self : "The pool to initialize"
  @param storage : "The caller-owned buffer for the pool slots"
- @param block_size : "The maximum requested size of each allocation"
- @param alignment : "The maximum supported request alignment, or zero for default"
+ @param block_size : "The maximum requested size of each allocation; must be positive"
+ @param alignment : "The maximum supported request alignment, zero for default; must be valid"
  @return "A pointer to the initialized pool"
- @require block_size > 0 : "Pool block size must be positive"
- @require !alignment || mem::is_valid_alignment(alignment) : "Pool alignment must be a valid power of two"
 *>
 fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz alignment = 0)
 {
-	assert(block_size > 0, "Pool block size must be positive.");
-	assert(allocator_valid_alignment(alignment), "Pool alignment must be valid.");
+	// Validated by an explicit guard, not assert/contract: those would let
+	// the optimizer discard the guard at -O2. An invalid init leaves an
+	// empty pool, so every acquisition fails cleanly.
+	if (block_size <= 0 || !allocator_valid_alignment(alignment))
+	{
+		self.data = storage;
+		self.block_size = 0;
+		self.alignment = mem::DEFAULT_MEM_ALIGNMENT;
+		self.payload_offset = 0;
+		self.slot_stride = 0;
+		self.first_slot_offset = 0;
+		self.slot_count = 0;
+		self.free_count = 0;
+		self.free_head = null;
+		return self;
+	}
 	alignment = allocator_effective_alignment_min(alignment, PoolSlot::alignment);
 	assert(mem::is_valid_alignment(alignment), "Effective pool alignment must be valid.");
 
@@ -157,6 +172,9 @@ fn sz PoolAllocator.available(&self) => self.free_count;
 *>
 fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "PoolAllocator invariant violated.");
+	$endif
 	if (size <= 0 || size > self.block_size) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if ((alignment ?: mem::DEFAULT_MEM_ALIGNMENT) > self.alignment) return mem::INVALID_ALLOC_SIZE~;
@@ -192,6 +210,9 @@ fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alig
 *>
 fn void*? PoolAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "PoolAllocator invariant violated.");
+	$endif
 	if (!old_pointer || new_size <= 0 || new_size > self.block_size) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if ((alignment ?: mem::DEFAULT_MEM_ALIGNMENT) > self.alignment) return mem::INVALID_ALLOC_SIZE~;
@@ -248,6 +269,9 @@ fn PoolSlot* pool_slot_for_pointer(PoolAllocator* self, void* pointer) @local
 *>
 fn void PoolAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "PoolAllocator invariant violated.");
+	$endif
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
 	if (!slot || !slot.in_use || self.free_count >= self.slot_count) return;
 	if (!allocator_canary_intact(
@@ -275,4 +299,44 @@ fn bool PoolAllocator.canary_intact(&self, void* pointer)
 	PoolSlot* slot = pool_slot_for_pointer(self, pointer);
 	if (!slot || !slot.in_use) return false;
 	return allocator_canary_intact((char*)pointer + slot.requested_size, self.block_size - slot.requested_size);
+}
+
+<*
+ Verify the pool's structural invariants.
+
+ Walks the free list and checks every node: slot alignment within the
+ buffer, exactly one list membership per free slot, and that the walk
+ length matches `free_count`. Returns false instead of crashing on a
+ corrupt list, and caps the walk so a cycled list terminates. Runs
+ automatically at the end of every mutating operation in test builds;
+ call it directly in tests after hand-rolled operation sequences.
+
+ @param [&in] self : "The pool to verify"
+ @return "True when all invariants hold"
+*>
+fn bool PoolAllocator.debug_verify(&self)
+{
+	if (self.slot_count < 0 || self.free_count < 0 || self.free_count > self.slot_count) return false;
+	if (self.slot_count == 0)
+	{
+		return self.free_head == null && self.free_count == 0;
+	}
+	if (!self.data.ptr || self.slot_stride <= 0) return false;
+
+	uptr first_addr = (uptr)self.data.ptr + (uptr)self.first_slot_offset;
+	sz count = 0;
+	PoolSlot* slot = self.free_head;
+	while (slot)
+	{
+		count++;
+		if (count > self.free_count) return false;
+		uptr addr = (uptr)slot;
+		if (addr < first_addr) return false;
+		uptr displacement = addr - first_addr;
+		if (displacement % (uptr)self.slot_stride != 0) return false;
+		if (displacement / (uptr)self.slot_stride >= (uptr)self.slot_count) return false;
+		if (slot.in_use) return false;
+		slot = slot.next;
+	}
+	return count == self.free_count;
 }

@@ -312,6 +312,10 @@ fn sz BitmapBuddyAllocator.largest_free(&self)
 *>
 fn void BitmapBuddyAllocator.clear(&self)
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BitmapBuddyAllocator invariant violated.");
+	$endif
+
 	for (sz i = 0; i <= self.max_order; i++)
 	{
 		sz nblock = self.managed_bytes / (((sz)BITMAP_BUDDY_LEAF) << i);
@@ -487,6 +491,9 @@ fn BitmapBuddyFree** bitmap_buddy_find_fit(
 *>
 fn void*? BitmapBuddyAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BitmapBuddyAllocator invariant violated.");
+	$endif
 	if (size <= 0) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if (!self.managed_bytes) return mem::OUT_OF_MEMORY~;
@@ -561,6 +568,9 @@ fn bool bitmap_buddy_remove_free(BitmapBuddyAllocator* self, sz order, uptr bloc
 *>
 fn void BitmapBuddyAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BitmapBuddyAllocator invariant violated.");
+	$endif
 	if (!old_pointer) return;
 
 	sz order = 0;
@@ -616,6 +626,72 @@ fn bool BitmapBuddyAllocator.owns(&self, void* pointer)
 }
 
 <*
+ Verify the bitmap buddy allocator's structural invariants.
+
+ Walks every order's free list and checks each block: containment in
+ the managed region, alignment to its block size, a clear `alloc` bit
+ for its index, and that the walk length matches the order's free
+ count; the size sum must match `free_bytes`. Returns false instead of
+ crashing on a corrupt list, and caps each walk so a cycled list
+ terminates. Runs automatically at the end of every mutating operation
+ in test builds; call it directly in tests after hand-rolled operation
+ sequences.
+
+ @param [&in] self : "The allocator to verify"
+ @return "True when all invariants hold"
+*>
+fn bool BitmapBuddyAllocator.debug_verify(&self)
+{
+	if (self.max_order < 0 || self.max_order >= BITMAP_BUDDY_MAX_ORDERS) return false;
+	if (self.free_bytes < 0) return false;
+	if (self.managed_bytes <= 0)
+	{
+		for (sz order = 0; order <= self.max_order; order++)
+		{
+			if (self.free_heads[order] != null || self.free_counts[order] != 0) return false;
+		}
+		return self.free_bytes == 0;
+	}
+	if (self.free_bytes > self.managed_bytes) return false;
+
+	uptr managed_end = self.buddy_base + (uptr)self.managed_bytes;
+	sz sum = 0;
+	for (sz order = 0; order <= self.max_order; order++)
+	{
+		sz block_size = ((sz)BITMAP_BUDDY_LEAF << order);
+		if (block_size <= 0 || block_size > self.managed_bytes) return false;
+		if (self.alloc_bits[order] == null)
+		{
+			if (self.free_heads[order] != null || self.free_counts[order] != 0) return false;
+			continue;
+		}
+		sz nblock = self.managed_bytes / block_size;
+		sz count = 0;
+		BitmapBuddyFree* block = self.free_heads[order];
+		while (block)
+		{
+			count++;
+			if (count > nblock)
+			{
+				return false;
+			}
+			uptr addr = (uptr)block;
+			if (addr < self.buddy_base) return false;
+			if (addr > uptr::max - (uptr)block_size) return false;
+			if (addr + (uptr)block_size > managed_end) return false;
+			if ((addr - self.buddy_base) % (uptr)block_size != 0) return false;
+			sz index = (sz)((addr - self.buddy_base) / (uptr)block_size);
+			if (bitmap_buddy_bit(self.alloc_bits[order], index)) return false;
+			if (sum > self.managed_bytes - block_size) return false;
+			sum += block_size;
+			block = block.next;
+		}
+		if (count != self.free_counts[order]) return false;
+	}
+	return sum == self.free_bytes;
+}
+
+<*
  Resize a block previously acquired from this allocator.
 
  Shrinks stay in place when the smaller order covers the requested size:
@@ -634,6 +710,9 @@ fn bool BitmapBuddyAllocator.owns(&self, void* pointer)
 *>
 fn void*? BitmapBuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BitmapBuddyAllocator invariant violated.");
+	$endif
 	if (!old_pointer || new_size <= 0) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 
@@ -652,6 +731,10 @@ fn void*? BitmapBuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	{
 		sz index = (sz)((block_start - self.buddy_base) / (uptr)old_size);
 		bitmap_buddy_clear_bit(self.alloc_bits[order], index);
+		// Poison before publishing: the tail region below becomes free
+		// ranges, and publishing afterwards overwrites the node headers
+		// with valid links instead of the poison overwriting them.
+		allocator_poison_if_testing((char*)block_start + (uptr)new_block_size, old_size - new_block_size);
 		sz cursor_index = index;
 		for (sz k = order; k > new_order; k--)
 		{
@@ -667,7 +750,6 @@ fn void*? BitmapBuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 
 		bitmap_buddy_set_bit(self.alloc_bits[new_order], cursor_index);
 		self.free_bytes += old_size - new_block_size;
-		allocator_poison_if_testing((char*)block_start + (uptr)new_block_size, old_size - new_block_size);
 		return old_pointer;
 	}
 	if (new_order == order) return old_pointer;

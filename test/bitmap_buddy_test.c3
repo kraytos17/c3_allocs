@@ -272,3 +272,24 @@ fn void bitmap_buddy_pressure_storm_restores_free_bytes() @test
 	assert(buddy.bytes_free() == initial_free);
 	assert(buddy.largest_free() == buddy.capacity());
 }
+
+fn void bitmap_buddy_shrink_keeps_free_list_intact() @test
+{
+	char[4096] storage;
+	allocators::BitmapBuddyAllocator buddy;
+	buddy.init(storage[..]);
+	sz initial_free = buddy.bytes_free();
+
+	char* original = buddy.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 64; i++) original[i] = (char)(i + 5);
+	char* shrunk = buddy.resize(original, 24)!!;
+	assert(shrunk == original);
+	// The shrink publishes right-hand buddies into the released tail.
+	// Poisoning must happen before publishing, or the fresh links are
+	// clobbered and the next walk follows garbage.
+	assert(buddy.debug_verify());
+	buddy.release(shrunk, false);
+	assert(buddy.debug_verify());
+	assert(buddy.bytes_free() == initial_free);
+	assert(buddy.free_block_count() == 1);
+}

@@ -199,6 +199,9 @@ fn bool BuddyAllocator.owns(&self, void* pointer) => buddy_used_header((BuddyAll
 *>
 fn void BuddyAllocator.clear(&self)
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BuddyAllocator invariant violated.");
+	$endif
 	for (sz i = 0; i < BUDDY_MAX_ORDERS; i++) self.free_heads[i] = null;
 	self.free_bytes = 0;
 	if (self.region_size)
@@ -300,6 +303,9 @@ fn BuddyUsedHeader* buddy_used_header(BuddyAllocator* self, void* pointer) @loca
 *>
 fn void*? BuddyAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BuddyAllocator invariant violated.");
+	$endif
 	if (size <= 0) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if (!self.region_size) return mem::OUT_OF_MEMORY~;
@@ -386,6 +392,9 @@ fn bool buddy_remove_free(BuddyAllocator* self, sz order, uptr block_start) @loc
 *>
 fn void BuddyAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BuddyAllocator invariant violated.");
+	$endif
 	if (!old_pointer) return;
 
 	BuddyUsedHeader* header = buddy_used_header(self, old_pointer);
@@ -442,6 +451,59 @@ fn bool BuddyAllocator.canary_intact(&self, void* pointer)
 }
 
 <*
+ Verify the buddy allocator's structural invariants.
+
+ Walks every order's free list and checks each block: containment in
+ the carved region, alignment to its block size, and that the size sum
+ matches `free_bytes`. Returns false instead of crashing on a corrupt
+ list, and caps each walk so a cycled list terminates. Runs
+ automatically at the end of every mutating operation in test builds;
+ call it directly in tests after hand-rolled operation sequences.
+
+ @param [&in] self : "The allocator to verify"
+ @return "True when all invariants hold"
+*>
+fn bool BuddyAllocator.debug_verify(&self)
+{
+	if (self.max_order < 0 || self.max_order >= BUDDY_MAX_ORDERS) return false;
+	if (self.free_bytes < 0) return false;
+	if (self.region_size <= 0)
+	{
+		for (sz order = 0; order <= self.max_order; order++)
+		{
+			if (self.free_heads[order] != null) return false;
+		}
+		return self.free_bytes == 0;
+	}
+	if (self.free_bytes > self.region_size) return false;
+
+	uptr region_end = self.region_base + (uptr)self.region_size;
+	sz sum = 0;
+	for (sz order = 0; order <= self.max_order; order++)
+	{
+		sz block_size = ((sz)BUDDY_MIN_BLOCK << order);
+		if (block_size <= 0 || block_size > self.region_size) return false;
+		sz cap = self.region_size / block_size + 1;
+		sz count = 0;
+		BuddyFree* block = self.free_heads[order];
+		while (block)
+		{
+			count++;
+			if (count > cap) return false;
+			uptr addr = (uptr)block;
+			if (addr < self.region_base) return false;
+			if (addr > uptr::max - (uptr)block_size) return false;
+			if (addr + (uptr)block_size > region_end) return false;
+			if ((addr - self.region_base) % (uptr)block_size != 0) return false;
+			if (sum > self.region_size - block_size) return false;
+			sum += block_size;
+			block = block.next;
+		}
+	}
+	return sum == self.free_bytes;
+}
+
+<*
  Resize a block previously acquired from this allocator.
 
  The block shrinks in place when the smaller payload fits. Growth
@@ -459,6 +521,9 @@ fn bool BuddyAllocator.canary_intact(&self, void* pointer)
 *>
 fn void*? BuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "BuddyAllocator invariant violated.");
+	$endif
 	if (!old_pointer || new_size <= 0) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 

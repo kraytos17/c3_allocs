@@ -165,11 +165,16 @@ metadata for tiny requests. Tracking overhead is about 3.4x here:
 the wrapped path got five times faster while the map-based bookkeeping
 stays constant, which is expected for a debug wrapper.
 
-One `-O2` caveat: `assert` is compiled out entirely, including its
-condition expression, so assertions never carry side effects. Corruption
-checks that must survive optimization are plain runtime guards instead:
-a corrupted trailing canary fails `resize` with `INVALID_ALLOC_SIZE`
-and makes `release` ignore the block, at every optimization level.
+One `-O2` caveat: `assert` and doc-comment `@require` contracts are
+optimization assumptions, not just stripped checks — the compiler may
+use them to delete code on the "impossible" path or miscompile a
+violation outright (observed: wrong results, `SIGSEGV`, `SIGILL`).
+Corruption and validation checks that must survive optimization are
+therefore plain runtime guards with no `assert`/`@require` on the
+same condition: a corrupted trailing canary fails `resize` with
+`INVALID_ALLOC_SIZE` and makes `release` ignore the block; an invalid
+`init` leaves the allocator empty; an out-of-range arena `reset` is
+ignored. All hold at every optimization level.
 
 ## Choosing an allocator
 

@@ -124,16 +124,15 @@ fn sz ArenaAllocator.mark(&self) => self.used;
 
 <*
  Reset the arena to a mark previously returned by `mark`, invalidating all
- allocations made after that position. The mark must not be greater than the
- arena's current used position.
+ allocations made after that position. A mark beyond the used position is
+ ignored: rewinding past it would place new allocations over live data.
 
  @param [&inout] self : "The arena to reset"
- @param mark : "A saved arena position"
- @require mark <= self.used : "The mark must not be beyond the current arena position"
+ @param mark : "A saved arena position; must not exceed the used position"
 *>
 fn void ArenaAllocator.reset(&self, sz mark)
 {
-	assert(mark <= self.used, "Arena mark is beyond the current allocation position.");
+	if (mark > self.used || mark < 0) return;
 	self.used = mark;
 }
 

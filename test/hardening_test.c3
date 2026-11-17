@@ -2,6 +2,7 @@ module c3_allocs;
 
 import std::core::mem;
 import std::core::mem::alloc;
+import std::core::env;
 import c3_allocs::allocators;
 
 fn void hardening_freelist_alignment_torture_16_32_64() @test
@@ -159,4 +160,68 @@ fn void hardening_pool_alignment_torture_and_canary_guard() @test
 
 	for (sz i = 0; i < 3; i++) pool.release(live[i], false);
 	assert(pool.available() == initial_available);
+}
+
+fn void hardening_invalid_init_degrades_safely() @test
+{
+	// Invalid configurations degrade to inert allocators at every
+	// optimization level: guards, not contracts, enforce these.
+	char[512] pool_storage;
+	allocators::PoolAllocator pool;
+	pool.init(pool_storage[..], 0, 0);
+	assert(pool.capacity() == 0);
+	assert(pool.available() == 0);
+	void*? no_slot = pool.acquire(8, alloc::AllocInitType.NO_ZERO);
+	if (catch no_slot)
+	{
+		// Expected: an empty pool serves nothing.
+	}
+	else
+	{
+		assert(false, "Expected acquire from an empty pool to fail.");
+	}
+	assert(!pool.owns(pool_storage[..].ptr));
+
+	pool.init(pool_storage[..], 64, 24);
+	assert(pool.capacity() == 0);
+	assert(pool.available() == 0);
+
+	char[128] arena_storage;
+	allocators::ArenaAllocator arena;
+	arena.init(arena_storage[..]);
+	void* first = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	sz reserved_before = arena.bytes_reserved();
+	arena.reset(arena.mark() + 100);
+	assert(arena.bytes_reserved() == reserved_before);
+	assert(arena.owns(first));
+
+	char[64] small_buf;
+	char[64] large_buf;
+	char[][2] bufs = { small_buf[..], large_buf[..] };
+	sz[2] sizes = { 32, 64 };
+	allocators::SizeClassAllocator classes;
+	classes.init(bufs[..], sizes[..]);
+	assert(classes.class_count() == 2);
+
+	char[][1] one_buf = { small_buf[..] };
+	sz[2] two_sizes = { 32, 64 };
+	allocators::SizeClassAllocator broken;
+	broken.init(one_buf[..], two_sizes[..]);
+	assert(broken.class_count() == 0);
+	void*? no_class = broken.acquire(16, alloc::AllocInitType.NO_ZERO);
+	if (catch no_class)
+	{
+		// Expected: no configured class can serve the request.
+	}
+	else
+	{
+		assert(false, "Expected acquire with zero classes to fail.");
+	}
+
+	allocators::SizeClassAllocator no_preset;
+	char[512] preset_storage;
+	no_preset.init_preset(preset_storage[..], 0);
+	assert(no_preset.class_count() == 0);
+	no_preset.init_preset(preset_storage[..], 100);
+	assert(no_preset.class_count() == 0);
 }
