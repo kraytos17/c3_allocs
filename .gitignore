@@ -1,2 +1,5 @@
 build/
 out/
+fuzz/corpus/
+HONGGFUZZ.REPORT.TXT
+*.fuzz

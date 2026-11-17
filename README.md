@@ -68,6 +68,9 @@ make bench       # Run the allocator benchmarks
 make fmt-check   # Check C3 formatting without changing files
 make fmt         # Format C3 files in place
 make check       # Run fmt-check, test, and build in sequence
+make fuzz        # Run fuzzer smoke: fixed seeds across all allocators
+make fuzz-long   # Deep fuzz run (SEED, ITERATIONS, MAXLIVE overrides)
+make fuzz-hf     # Bounded honggfuzz session (HF_N, HF_TIMEOUT, HF_THREADS)
 make clean       # Remove C3 build artifacts
 ```
 
@@ -77,8 +80,36 @@ changes before committing them. Formatting rules are in the root `.c3fmt` file.
 
 Pushes and pull requests also run `.github/workflows/ci.yml`, which
 installs `c3c` v0.8.6 from the official release assets and then runs
-`make check` (format check, full test suite, build) followed by
-`make bench`.
+`make check` (format check, full test suite, build), `make bench`,
+and `make fuzz` (fuzzer smoke across fixed seeds).
+
+### Fuzzing
+
+`fuzz/fuzz.c3` is a seeded differential-stress harness covering all
+allocators, separate from the unit tests so long runs do not slow the
+fast suite. Each scenario runs tens of thousands of mixed
+acquire/release/resize operations with edge-case sizes (0, boundaries
+around 8/16/32/64, uniform 1–256), alignments (0, 8–64, plus invalid 3),
+hostile releases (duplicates, interior and foreign pointers, null),
+and deliberate canary corruption that must trigger the `-O2` guards
+(failed resize, ignored release). Oracles include the free-list
+`debug_verify()`, canary sampling over all live blocks, slot/byte
+accounting on every operation, and full state restore at the end. Any
+failure prints the seed, the failing operation, and a 64-operation ring
+log, so `make fuzz-long SEED=<n>` reproduces it exactly:
+
+```sh
+make fuzz                                  # Smoke: seeds 1-3, ~1s total
+make fuzz-long SEED=5 ITERATIONS=50000 MAXLIVE=128
+```
+
+The same scenarios also run under honggfuzz (`docs/fuzz-honggfuzz.md`):
+`fuzz/fuzz_hf.c3` exposes them through a libhfuzz persistent entry
+point (the same binary still takes a file path for corpus validation
+and triage) and builds with `--sanitize=address`, so memory errors
+become honggfuzz-recorded crashes while oracle violations abort.
+`make fuzz-hf` runs a bounded persistent session (~5000 execs/s here);
+a weekly CI job runs the long session and uploads new coverage.
 
 ## Benchmarks
 
@@ -646,6 +677,12 @@ similar to mimalloc's debug mode:
   macros.
 - `src/main.c3` — executable entry point.
 - `bench/allocators_bench.c3` — allocator benchmarks run by `make bench`.
+- `fuzz/fuzz.c3` — seeded stress harness run by `make fuzz`.
+- `fuzz/fuzz_common.c3` — shared scenarios and oracles for both runners.
+- `fuzz/fuzz_hf.c3` — honggfuzz entry point; input file drives the stream.
+- `fuzz/make_corpus.py` — deterministic corpus generator (see below).
+- `fuzz/corpus/` — honggfuzz seed inputs (git-ignored, regenerative).
+- `docs/fuzz-honggfuzz.md` — honggfuzz setup, commands, and triage.
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
   `test/freelist_test.c3`, `test/buddy_test.c3`,
   `test/bitmap_buddy_test.c3`, `test/sizeclass_test.c3`,
