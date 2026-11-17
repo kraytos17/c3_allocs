@@ -71,6 +71,7 @@ make check       # Run fmt-check, test, and build in sequence
 make fuzz        # Run fuzzer smoke: fixed seeds across all allocators
 make fuzz-long   # Deep fuzz run (SEED, ITERATIONS, MAXLIVE overrides)
 make fuzz-hf     # Bounded honggfuzz session (HF_N, HF_TIMEOUT, HF_THREADS)
+make fuzz-hf-cov # Same, with clang coverage feedback (guided)
 make clean       # Remove C3 build artifacts
 ```
 
@@ -109,6 +110,8 @@ point (the same binary still takes a file path for corpus validation
 and triage) and builds with `--sanitize=address`, so memory errors
 become honggfuzz-recorded crashes while oracle violations abort.
 `make fuzz-hf` runs a bounded persistent session (~5000 execs/s here);
+`make fuzz-hf-cov` rebuilds through LLVM IR with clang coverage
+instrumentation for guided fuzzing;
 a weekly CI job runs the long session and uploads new coverage.
 
 ## Benchmarks

@@ -15,18 +15,20 @@ FUZZ_SOURCES := src/allocators/common.c3 src/allocators/arena.c3 \
 	src/allocators/freelist.c3 src/allocators/buddy.c3 \
 	src/allocators/bitmap_buddy.c3 \
 	src/allocators/sizeclass.c3 src/allocators/scratch.c3 \
+	src/allocators/tracking.c3 \
 	fuzz/fuzz_common.c3 fuzz/fuzz.c3
 HF_SOURCES := src/allocators/common.c3 src/allocators/arena.c3 \
 	src/allocators/pool.c3 src/allocators/backed_arena.c3 \
 	src/allocators/freelist.c3 src/allocators/buddy.c3 \
 	src/allocators/bitmap_buddy.c3 \
 	src/allocators/sizeclass.c3 src/allocators/scratch.c3 \
+	src/allocators/tracking.c3 \
 	fuzz/fuzz_common.c3 fuzz/fuzz_hf.c3
 
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 
-.PHONY: help all prepare build run test fmt fmt-check check bench fuzz fuzz-long clean fuzz-hf-deps fuzz-hf-corpus fuzz-hf
+.PHONY: help all prepare build run test fmt fmt-check check bench fuzz fuzz-long clean fuzz-hf-deps fuzz-hf-corpus fuzz-hf fuzz-hf-cov
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -79,8 +81,10 @@ HF_THREADS ?= 2
 HF_TIMEOUT ?= 10
 # Prefer a system honggfuzz, otherwise use the local build.
 HF_BIN = $(shell command -v $(HF) 2>/dev/null || echo $(HF_DIR)/honggfuzz)
-HF_LINK = -z $(HF_DIR)/libhfuzz/libhfuzz.a -z $(HF_DIR)/libhfcommon/libhfcommon.a \
+HF_LINK_C3C = -z $(HF_DIR)/libhfuzz/libhfuzz.a -z $(HF_DIR)/libhfcommon/libhfcommon.a \
 	-l unwind -l bfd -l opcodes -l lzma -l dl -l rt -l m -l atomic
+HF_LINK = $(HF_DIR)/libhfuzz/libhfuzz.a $(HF_DIR)/libhfcommon/libhfcommon.a \
+	-lunwind -lbfd -lopcodes -llzma -ldl -lrt -lm -latomic
 
 $(HF_DIR)/honggfuzz:
 	git clone --depth 1 https://github.com/google/honggfuzz.git $(HF_DIR)
@@ -101,8 +105,16 @@ fuzz/corpus/.complete: fuzz/make_corpus.py
 fuzz-hf: fuzz-hf-deps fuzz/corpus/.complete ## Run honggfuzz (persistent mode) against the ASan harness
 	@mkdir -p out out/hf_new
 	clang -O2 -c fuzz/hf_shim.c -o out/shim.o
-	$(C3C) -O2 --sanitize=address compile $(HF_SOURCES) out/shim.o $(HF_LINK) -o out/fuzz_hf
+	$(C3C) -O2 --sanitize=address compile $(HF_SOURCES) out/shim.o $(HF_LINK_C3C) -o out/fuzz_hf
 	$(HF_BIN) -P -f fuzz/corpus -o out/hf_new -N $(HF_N) -t $(HF_TIMEOUT) -n $(HF_THREADS) -- ./out/fuzz_hf
+
+fuzz-hf-cov: fuzz-hf-deps fuzz/corpus/.complete ## Run honggfuzz with clang coverage feedback
+	@mkdir -p out out/hf_new out/ll out/llobj out/obj
+	clang -O2 -fsanitize-coverage=trace-pc-guard -c fuzz/hf_shim.c -o out/shim_cov.o
+	$(C3C) -O2 --emit-llvm --llvm-out out/ll --obj-out out/obj compile-only $(HF_SOURCES)
+	@for f in out/ll/*.ll; do b=$$(basename $$f .ll); clang -O2 -fsanitize-coverage=trace-pc-guard -c $$f -o out/llobj/$$b.o || exit 1; done
+	clang -O2 -fsanitize=address -fsanitize-coverage=trace-pc-guard out/llobj/*.o out/shim_cov.o $(HF_LINK) -rdynamic -pthread -ldl -lm -o out/fuzz_hf_cov
+	$(HF_BIN) -P -f fuzz/corpus -o out/hf_new -N $(HF_N) -t $(HF_TIMEOUT) -n $(HF_THREADS) -- ./out/fuzz_hf_cov
 
 clean: ## Remove C3 build artifacts
 	$(C3C) clean

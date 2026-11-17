@@ -26,6 +26,8 @@ const FUZZ_RESIZE_FAIL = 5;
 const FUZZ_GUARD = 6;
 const FUZZ_HOSTILE = 7;
 const FUZZ_RESET = 8;
+const FUZZ_POLICY = 9;
+const FUZZ_CLEAR = 10;
 
 struct FuzzRng
 {
@@ -100,6 +102,26 @@ fn sz fuzz_alignment(FuzzRng* rng) @local
 	return aligns[r % 7];
 }
 
+fn alloc::AllocInitType fuzz_init_type(FuzzRng* rng) @local
+{
+	return fuzz_next(rng) % 3 == 0 ? alloc::AllocInitType.ZERO : alloc::AllocInitType.NO_ZERO;
+}
+
+fn FuzzRng fuzz_rng_hf_stream(ulong seed, char[] bytes, usz* mask)
+{
+	FuzzRng rng = fuzz_rng_stream(seed, bytes);
+	if (bytes.len >= 8)
+	{
+		ulong m = fuzz_next(&rng);
+		*mask = (usz)(m % 10);
+	}
+	else
+	{
+		*mask = 9;
+	}
+	return rng;
+}
+
 fn void fuzz_log(FuzzOp[] log, sz op, sz kind, sz a, sz b) @local
 {
 	log[op % FUZZ_LOG_SIZE].kind = kind;
@@ -134,7 +156,7 @@ fn int fuzz_freelist(char[] storage, FuzzRng base, sz iterations, sz max_live)
 	sz[FUZZ_MAXLIVE] reqs = { };
 	sz live_count = 0;
 	FuzzOp[FUZZ_LOG_SIZE] log = { };
-	for (sz op = 0; op < iterations; op++)
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
 	{
 		ulong roll = fuzz_next(&rng) % 100;
 		if (roll < 55 && live_count < max_live)
@@ -142,7 +164,7 @@ fn int fuzz_freelist(char[] storage, FuzzRng base, sz iterations, sz max_live)
 			sz size = fuzz_size(&rng);
 			sz alignment = fuzz_alignment(&rng);
 			sz free_before = list.bytes_free();
-			void*? got = list.acquire(size, alloc::AllocInitType.NO_ZERO, alignment);
+			void*? got = list.acquire(size, fuzz_init_type(&rng), alignment);
 			if (catch got)
 			{
 				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, alignment);
@@ -222,7 +244,7 @@ fn int fuzz_freelist(char[] storage, FuzzRng base, sz iterations, sz max_live)
 			reqs[idx] = reqs[live_count - 1];
 			live_count--;
 		}
-		else if (roll < 93 && live_count > 0)
+		else if (roll < 90 && live_count > 0)
 		{
 			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
 			void* p = live[idx];
@@ -275,10 +297,10 @@ fn int fuzz_freelist(char[] storage, FuzzRng base, sz iterations, sz max_live)
 			live[idx] = q;
 			reqs[idx] = new_size;
 		}
-		else if (roll < 96 && live_count > 0)
+		else if (roll < 93 && live_count > 0)
 		{
 			// Hostile releases must be ignored without state change.
-			sz pick = (sz)(fuzz_next(&rng) % 4);
+			sz pick = (sz)(fuzz_next(&rng) % 6);
 			if (pick == 0)
 			{
 				// Duplicate release: free a live block, then release it again.
@@ -308,6 +330,14 @@ fn int fuzz_freelist(char[] storage, FuzzRng base, sz iterations, sz max_live)
 				{
 					list.release(foreign, false);
 				}
+				else if (pick == 4)
+				{
+					list.release((char*)live[0] + 7, false);
+				}
+				else if (pick == 5 && reqs[0] > 1)
+				{
+					list.release((char*)live[0] + reqs[0] - 1, false);
+				}
 				else
 				{
 					list.release(null, false);
@@ -319,6 +349,31 @@ fn int fuzz_freelist(char[] storage, FuzzRng base, sz iterations, sz max_live)
 					fuzz_dump(rng.s, "freelist", op, log[..], "hostile release changed state");
 					return 1;
 				}
+			}
+		}
+		else if (roll < 95)
+		{
+			// Flip the selection policy; both must keep the list valid.
+			bool best = fuzz_next(&rng) % 2 == 0;
+			list.set_policy(best ? allocators::FreeListPolicy.BEST_FIT : allocators::FreeListPolicy.FIRST_FIT);
+			fuzz_log(log[..], op, FUZZ_POLICY, best ? 1 : 0, 0);
+			if (!list.debug_verify())
+			{
+				fuzz_dump(rng.s, "freelist", op, log[..], "policy switch broke invariants");
+				return 1;
+			}
+		}
+		else if (roll < 97)
+		{
+			// Bulk clear must restore one contiguous range.
+			for (sz i = 0; i < live_count; i++) list.release(live[i], false);
+			live_count = 0;
+			list.clear();
+			fuzz_log(log[..], op, FUZZ_CLEAR, 0, 0);
+			if (list.bytes_free() != initial_free || list.free_block_count() != 1 || !list.debug_verify())
+			{
+				fuzz_dump(rng.s, "freelist", op, log[..], "clear did not restore single range");
+				return 1;
 			}
 		}
 		else
@@ -374,7 +429,7 @@ fn int fuzz_pool(char[] storage, FuzzRng base, sz iterations, sz max_live)
 	sz[FUZZ_MAXLIVE] reqs = { };
 	sz live_count = 0;
 	FuzzOp[FUZZ_LOG_SIZE] log = { };
-	for (sz op = 0; op < iterations; op++)
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
 	{
 		if (pool.available() + live_count != capacity)
 		{
@@ -388,7 +443,7 @@ fn int fuzz_pool(char[] storage, FuzzRng base, sz iterations, sz max_live)
 			sz size = fuzz_size(&rng) % 96;
 			if (size <= 0) size = 1;
 			sz free_before = pool.available();
-			void*? got = pool.acquire(size, alloc::AllocInitType.NO_ZERO);
+			void*? got = pool.acquire(size, fuzz_init_type(&rng));
 			if (catch got)
 			{
 				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, 0);
@@ -448,11 +503,16 @@ fn int fuzz_pool(char[] storage, FuzzRng base, sz iterations, sz max_live)
 			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
 			void* p = live[idx];
 			sz old_req = reqs[idx];
-			sz new_size = 1 + (sz)(fuzz_next(&rng) % 64);
-			void*? shrunk = pool.resize(p, new_size, 0);
+			sz new_size = 1 + (sz)(fuzz_next(&rng) % 96);
+			void*? shrunk = pool.resize(p, new_size, fuzz_alignment(&rng));
 			if (catch shrunk)
 			{
 				fuzz_log(log[..], op, FUZZ_RESIZE_FAIL, old_req, new_size);
+				if (!pool.canary_intact(p) || !pool.owns(p))
+				{
+					fuzz_dump(rng.s, "pool", op, log[..], "failed resize damaged slot");
+					return 1;
+				}
 				continue;
 			}
 
@@ -531,7 +591,7 @@ fn int fuzz_buddy(char[] storage, FuzzRng base, sz iterations, sz max_live)
 	sz[FUZZ_MAXLIVE] reqs = { };
 	sz live_count = 0;
 	FuzzOp[FUZZ_LOG_SIZE] log = { };
-	for (sz op = 0; op < iterations; op++)
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
 	{
 		if (buddy.bytes_used() + buddy.bytes_free() != buddy.capacity())
 		{
@@ -544,7 +604,7 @@ fn int fuzz_buddy(char[] storage, FuzzRng base, sz iterations, sz max_live)
 		{
 			sz size = 1 + (sz)(fuzz_next(&rng) % 512);
 			sz free_before = buddy.bytes_free();
-			void*? got = buddy.acquire(size, alloc::AllocInitType.NO_ZERO);
+			void*? got = buddy.acquire(size, fuzz_init_type(&rng));
 			if (catch got)
 			{
 				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, 0);
@@ -660,7 +720,7 @@ fn int fuzz_bitmap_buddy(char[] storage, FuzzRng base, sz iterations, sz max_liv
 	void*[FUZZ_MAXLIVE] live = { };
 	sz live_count = 0;
 	FuzzOp[FUZZ_LOG_SIZE] log = { };
-	for (sz op = 0; op < iterations; op++)
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
 	{
 		if (buddy.bytes_used() + buddy.bytes_free() != buddy.capacity())
 		{
@@ -671,9 +731,9 @@ fn int fuzz_bitmap_buddy(char[] storage, FuzzRng base, sz iterations, sz max_liv
 		ulong roll = fuzz_next(&rng) % 100;
 		if (roll < 55 && live_count < max_live)
 		{
-			sz size = 8 * (1 + (sz)(fuzz_next(&rng) % 16));
+			sz size = 1 + (sz)(fuzz_next(&rng) % 128);
 			sz free_before = buddy.bytes_free();
-			void*? got = buddy.acquire(size, alloc::AllocInitType.NO_ZERO);
+			void*? got = buddy.acquire(size, fuzz_init_type(&rng));
 			if (catch got)
 			{
 				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, 0);
@@ -710,7 +770,7 @@ fn int fuzz_bitmap_buddy(char[] storage, FuzzRng base, sz iterations, sz max_liv
 		{
 			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
 			void* p = live[idx];
-			sz new_size = 8 * (1 + (sz)(fuzz_next(&rng) % 16));
+			sz new_size = 1 + (sz)(fuzz_next(&rng) % 128);
 			void*? grown = buddy.resize(p, new_size, 0);
 			if (catch grown)
 			{
@@ -747,7 +807,7 @@ fn int fuzz_sizeclass(char[] storage, FuzzRng base, sz iterations, sz max_live)
 	void*[FUZZ_MAXLIVE] live = { };
 	sz live_count = 0;
 	FuzzOp[FUZZ_LOG_SIZE] log = { };
-	for (sz op = 0; op < iterations; op++)
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
 	{
 		if (classes.available() + live_count != capacity)
 		{
@@ -760,7 +820,7 @@ fn int fuzz_sizeclass(char[] storage, FuzzRng base, sz iterations, sz max_live)
 		{
 			sz size = 1 + (sz)(fuzz_next(&rng) % 400);
 			sz available_before = classes.available();
-			void*? got = classes.acquire(size, alloc::AllocInitType.NO_ZERO);
+			void*? got = classes.acquire(size, fuzz_init_type(&rng));
 			if (catch got)
 			{
 				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, 0);
@@ -821,17 +881,23 @@ fn int fuzz_backed_arena(char[] initial, char[] backing_storage, FuzzRng base, s
 
 	FuzzRng rng = base;
 	if (rng.s == 0) rng.s = 0x78DDE6E5FD29E471;
+
 	void*[FUZZ_MAXLIVE] live = { };
 	sz[FUZZ_MAXLIVE] reqs = { };
+	sz[FUZZ_MAXLIVE] seqs = { };
 	sz live_count = 0;
+	sz seq_next = 0;
+	sz saved_mark = 0;
+	sz saved_seq = 0;
+	bool have_mark = false;
 	FuzzOp[FUZZ_LOG_SIZE] log = { };
-	for (sz op = 0; op < iterations; op++)
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
 	{
 		ulong roll = fuzz_next(&rng) % 100;
 		if (roll < 60 && live_count < max_live)
 		{
 			sz size = 1 + (sz)(fuzz_next(&rng) % 1024);
-			void*? got = arena.acquire(size, alloc::AllocInitType.NO_ZERO);
+			void*? got = arena.acquire(size, fuzz_init_type(&rng));
 			if (catch got)
 			{
 				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, 0);
@@ -850,22 +916,78 @@ fn int fuzz_backed_arena(char[] initial, char[] backing_storage, FuzzRng base, s
 
 			live[live_count] = p;
 			reqs[live_count] = size;
+			seqs[live_count] = seq_next;
+			seq_next++;
 			live_count++;
 		}
-		else if (roll < 90 && live_count > 0)
+		else if (roll < 85 && live_count > 0)
 		{
 			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
 			arena.release(live[idx], false);
 			fuzz_log(log[..], op, FUZZ_RELEASE, reqs[idx], 0);
 			live[idx] = live[live_count - 1];
 			reqs[idx] = reqs[live_count - 1];
+			seqs[idx] = seqs[live_count - 1];
 			live_count--;
+		}
+		else if (roll < 90)
+		{
+			// Positional rewind machinery: marks, pooled-page reset, prune.
+			sz sub = (sz)(fuzz_next(&rng) % 3);
+			if (sub == 0 || !have_mark)
+			{
+				saved_mark = arena.mark();
+				saved_seq = seq_next;
+				have_mark = true;
+				fuzz_log(log[..], op, FUZZ_RESET, 1, 0);
+			}
+			else if (sub == 1)
+			{
+				arena.reset_retaining(saved_mark);
+				sz kept = 0;
+				for (sz i = 0; i < live_count; i++)
+				{
+					if (seqs[i] < saved_seq)
+					{
+						live[kept] = live[i];
+						reqs[kept] = reqs[i];
+						seqs[kept] = seqs[i];
+						kept++;
+					}
+				}
+
+				live_count = kept;
+				fuzz_log(log[..], op, FUZZ_RESET, 2, 0);
+				for (sz i = 0; i < live_count; i++)
+				{
+					if (!arena.owns(live[i]))
+					{
+						fuzz_dump(rng.s, "backed", op, log[..], "reset kept a dead block");
+						return 1;
+					}
+				}
+			}
+			else
+			{
+				arena.prune_pool();
+				fuzz_log(log[..], op, FUZZ_RESET, 3, 0);
+			}
+			if (op % 64 == 0)
+			{
+				arena.prune_pool();
+				if (arena.page_pool_count() != 0)
+				{
+					fuzz_dump(rng.s, "backed", op, log[..], "prune did not drain pool");
+					return 1;
+				}
+			}
 		}
 		else if (roll < 95)
 		{
 			// Reclaim everything at once, then keep going.
 			for (sz i = 0; i < live_count; i++) arena.release(live[i], false);
 			live_count = 0;
+			have_mark = false;
 			arena.clear();
 			fuzz_log(log[..], op, FUZZ_RESET, 0, 0);
 			if (arena.overflow_count() != 0)
@@ -903,6 +1025,8 @@ fn int fuzz_backed_arena(char[] initial, char[] backing_storage, FuzzRng base, s
 
 			live[idx] = q;
 			reqs[idx] = new_size;
+			seqs[idx] = seq_next;
+			seq_next++;
 		}
 	}
 	for (sz i = 0; i < live_count; i++) arena.release(live[i], false);
@@ -928,7 +1052,7 @@ fn int fuzz_scratch(char[] storage, FuzzRng base, sz iterations, sz max_live)
 	void*[FUZZ_MAXLIVE] live = { };
 	sz live_count = 0;
 	FuzzOp[FUZZ_LOG_SIZE] log = { };
-	for (sz op = 0; op < iterations; op++)
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
 	{
 		if (scratch.peak() < scratch.bytes_reserved())
 		{
@@ -940,7 +1064,7 @@ fn int fuzz_scratch(char[] storage, FuzzRng base, sz iterations, sz max_live)
 		if (roll < 70 && live_count < FUZZ_MAXLIVE)
 		{
 			sz size = 1 + (sz)(fuzz_next(&rng) % 256);
-			void*? got = scratch.acquire(size, alloc::AllocInitType.NO_ZERO);
+			void*? got = scratch.acquire(size, fuzz_init_type(&rng));
 			if (catch got)
 			{
 				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, 0);
@@ -960,11 +1084,26 @@ fn int fuzz_scratch(char[] storage, FuzzRng base, sz iterations, sz max_live)
 			live[live_count] = p;
 			live_count++;
 		}
-		else if (roll < 85 && live_count > 0 && scratch.is_last(live[live_count - 1]))
+		else if (roll < 85 && live_count > 0)
 		{
-			scratch.release(live[live_count - 1], false);
-			fuzz_log(log[..], op, FUZZ_RELEASE, 0, 0);
-			live_count--;
+			if (scratch.is_last(live[live_count - 1]))
+			{
+				scratch.release(live[live_count - 1], false);
+				fuzz_log(log[..], op, FUZZ_RELEASE, 0, 0);
+				live_count--;
+			}
+			else
+			{
+				// A non-last release must be ignored without state change.
+				sz reserved_before = scratch.bytes_reserved();
+				scratch.release(live[0], false);
+				fuzz_log(log[..], op, FUZZ_HOSTILE, 0, 0);
+				if (scratch.bytes_reserved() != reserved_before)
+				{
+					fuzz_dump(rng.s, "scratch", op, log[..], "non-last release changed state");
+					return 1;
+				}
+			}
 		}
 		else
 		{
@@ -975,5 +1114,378 @@ fn int fuzz_scratch(char[] storage, FuzzRng base, sz iterations, sz max_live)
 	}
 
 	scratch.clear();
+	return 0;
+}
+
+fn int fuzz_arena(char[] storage, FuzzRng base, sz iterations, sz max_live)
+{
+	allocators::ArenaAllocator arena;
+	arena.init(storage[..]);
+
+	FuzzRng rng = base;
+	if (rng.s == 0) rng.s = 0xA1E4A1E4A1E4A1E4;
+
+	void*[FUZZ_MAXLIVE] live = { };
+	sz[FUZZ_MAXLIVE] reqs = { };
+	sz[FUZZ_MAXLIVE] seqs = { };
+	sz live_count = 0;
+	sz seq_next = 0;
+	sz saved_mark = 0;
+	sz saved_seq = 0;
+	bool have_mark = false;
+	FuzzOp[FUZZ_LOG_SIZE] log = { };
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
+	{
+		if (arena.bytes_reserved() > arena.capacity())
+		{
+			fuzz_dump(rng.s, "arena", op, log[..], "reserved exceeds capacity");
+			return 1;
+		}
+
+		ulong roll = fuzz_next(&rng) % 100;
+		if (roll < 55 && live_count < max_live)
+		{
+			sz size = fuzz_size(&rng);
+			sz alignment = fuzz_alignment(&rng);
+			sz reserved_before = arena.bytes_reserved();
+			void*? got = arena.acquire(size, fuzz_init_type(&rng), alignment);
+			if (catch got)
+			{
+				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, alignment);
+				if (arena.bytes_reserved() != reserved_before)
+				{
+					fuzz_dump(rng.s, "arena", op, log[..], "failed acquire moved position");
+					return 1;
+				}
+				continue;
+			}
+
+			void* p = got;
+			fuzz_log(log[..], op, FUZZ_ACQUIRE_OK, size, alignment);
+			if (!arena.owns(p) || !arena.is_last(p))
+			{
+				fuzz_dump(rng.s, "arena", op, log[..], "fresh block not owned/last");
+				return 1;
+			}
+
+			char* bytes = (char*)p;
+			for (sz i = 0; i < size; i++) bytes[i] = (char)i;
+			live[live_count] = p;
+			reqs[live_count] = size;
+			seqs[live_count] = seq_next;
+			seq_next++;
+			live_count++;
+		}
+		else if (roll < 80 && live_count > 0)
+		{
+			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			void* p = live[idx];
+			sz reserved_before = arena.bytes_reserved();
+			if (arena.is_last(p))
+			{
+				arena.release(p, false);
+				fuzz_log(log[..], op, FUZZ_RELEASE, reqs[idx], 0);
+				if (arena.bytes_reserved() >= reserved_before)
+				{
+					fuzz_dump(rng.s, "arena", op, log[..], "last release did not reclaim");
+					return 1;
+				}
+
+				live[idx] = live[live_count - 1];
+				reqs[idx] = reqs[live_count - 1];
+				seqs[idx] = seqs[live_count - 1];
+				live_count--;
+			}
+			else
+			{
+				arena.release(p, false);
+				fuzz_log(log[..], op, FUZZ_HOSTILE, reqs[idx], 0);
+				if (arena.bytes_reserved() != reserved_before)
+				{
+					fuzz_dump(rng.s, "arena", op, log[..], "non-last release changed state");
+					return 1;
+				}
+			}
+		}
+		else if (roll < 85)
+		{
+			sz sub = (sz)(fuzz_next(&rng) % 2);
+			if (sub == 0 || !have_mark)
+			{
+				saved_mark = arena.mark();
+				saved_seq = seq_next;
+				have_mark = true;
+				fuzz_log(log[..], op, FUZZ_RESET, 1, 0);
+			}
+			else
+			{
+				arena.reset(saved_mark);
+				sz kept = 0;
+				for (sz i = 0; i < live_count; i++)
+				{
+					if (seqs[i] < saved_seq)
+					{
+						live[kept] = live[i];
+						reqs[kept] = reqs[i];
+						seqs[kept] = seqs[i];
+						kept++;
+					}
+				}
+
+				live_count = kept;
+				fuzz_log(log[..], op, FUZZ_RESET, 2, 0);
+				for (sz i = 0; i < live_count; i++)
+				{
+					if (!arena.owns(live[i]))
+					{
+						fuzz_dump(rng.s, "arena", op, log[..], "reset kept a dead block");
+						return 1;
+					}
+				}
+			}
+		}
+		else if (roll < 88)
+		{
+			arena.clear();
+			live_count = 0;
+			have_mark = false;
+			fuzz_log(log[..], op, FUZZ_CLEAR, 0, 0);
+			if (arena.bytes_reserved() != 0)
+			{
+				fuzz_dump(rng.s, "arena", op, log[..], "clear did not reset position");
+				return 1;
+			}
+		}
+		else if (roll < 93 && live_count > 0)
+		{
+			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			void* p = live[idx];
+			sz old_req = reqs[idx];
+			sz new_size = fuzz_size(&rng);
+			sz alignment = fuzz_alignment(&rng);
+			void*? grown = arena.resize(p, new_size, alignment);
+			if (catch grown)
+			{
+				fuzz_log(log[..], op, FUZZ_RESIZE_FAIL, old_req, new_size);
+				char* bytes = (char*)p;
+				for (sz i = 0; i < old_req; i++)
+				{
+					if (bytes[i] != (char)i)
+					{
+						fuzz_dump(rng.s, "arena", op, log[..], "failed resize damaged payload");
+						return 1;
+					}
+				}
+				continue;
+			}
+
+			void* q = grown;
+			fuzz_log(log[..], op, FUZZ_RESIZE_OK, old_req, new_size);
+			if (!arena.owns(q))
+			{
+				fuzz_dump(rng.s, "arena", op, log[..], "resized block not owned");
+				return 1;
+			}
+
+			char* qbytes = (char*)q;
+			sz prefix = old_req < new_size ? old_req : new_size;
+			for (sz i = 0; i < prefix; i++)
+			{
+				if (qbytes[i] != (char)i)
+				{
+					fuzz_dump(rng.s, "arena", op, log[..], "resize lost prefix");
+					return 1;
+				}
+			}
+			for (sz i = 0; i < new_size; i++) qbytes[i] = (char)i;
+
+			live[idx] = q;
+			reqs[idx] = new_size;
+			seqs[idx] = seq_next;
+			seq_next++;
+		}
+		else
+		{
+			fuzz_log(log[..], op, FUZZ_RESET, live_count, 0);
+			for (sz i = 0; i < live_count; i++)
+			{
+				if (!arena.owns(live[i]))
+				{
+					fuzz_dump(rng.s, "arena", op, log[..], "live block not owned");
+					return 1;
+				}
+			}
+		}
+	}
+
+	arena.clear();
+	if (arena.bytes_reserved() != 0)
+	{
+		fuzz_dump(rng.s, "arena", iterations, log[..], "final clear failed");
+		return 1;
+	}
+	return 0;
+}
+
+fn int fuzz_tracking(char[] storage, FuzzRng base, sz iterations, sz max_live)
+{
+	allocators::FreeListAllocator backing;
+	backing.init(storage[..]);
+	allocators::TrackingAllocator tracker;
+	tracker.init(&backing);
+	char[64] foreign_storage;
+	void* foreign = (void*)foreign_storage[..].ptr;
+
+	FuzzRng rng = base;
+	if (rng.s == 0) rng.s = 0x71AC9EDBAC71AC;
+
+	void*[FUZZ_MAXLIVE] live = { };
+	sz[FUZZ_MAXLIVE] reqs = { };
+	sz live_count = 0;
+	sz expected_sum = 0;
+	sz expected_unmatched = 0;
+	FuzzOp[FUZZ_LOG_SIZE] log = { };
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
+	{
+		if (tracker.live_count() != live_count || tracker.live_bytes() != expected_sum)
+		{
+			fuzz_dump(rng.s, "tracking", op, log[..], "bookkeeping drift");
+			return 1;
+		}
+
+		ulong roll = fuzz_next(&rng) % 100;
+		if (roll < 55 && live_count < max_live)
+		{
+			sz size = fuzz_size(&rng);
+			sz alignment = fuzz_alignment(&rng);
+			sz backing_before = backing.bytes_free();
+			void*? got = tracker.acquire(size, fuzz_init_type(&rng), alignment);
+			if (catch got)
+			{
+				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, alignment);
+				if (backing.bytes_free() != backing_before)
+				{
+					fuzz_dump(rng.s, "tracking", op, log[..], "failed acquire touched backing");
+					return 1;
+				}
+				continue;
+			}
+
+			void* p = got;
+			fuzz_log(log[..], op, FUZZ_ACQUIRE_OK, size, alignment);
+			char* bytes = (char*)p;
+			for (sz i = 0; i < size; i++) bytes[i] = (char)i;
+
+			live[live_count] = p;
+			reqs[live_count] = size;
+			live_count++;
+			expected_sum += size;
+		}
+		else if (roll < 80 && live_count > 0)
+		{
+			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			tracker.release(live[idx], false);
+			fuzz_log(log[..], op, FUZZ_RELEASE, reqs[idx], 0);
+			expected_sum -= reqs[idx];
+			live[idx] = live[live_count - 1];
+			reqs[idx] = reqs[live_count - 1];
+			live_count--;
+		}
+		else if (roll < 85 && live_count > 0)
+		{
+			// Duplicate release: remove from the set, release, then
+			// release again. The second must be counted and not
+			// forwarded to the backing allocator.
+			sz dup_idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			void* dup = live[dup_idx];
+			expected_sum -= reqs[dup_idx];
+			live[dup_idx] = live[live_count - 1];
+			reqs[dup_idx] = reqs[live_count - 1];
+			live_count--;
+			tracker.release(dup, false);
+			sz backing_before = backing.bytes_free();
+			tracker.release(dup, false);
+			expected_unmatched++;
+			fuzz_log(log[..], op, FUZZ_HOSTILE, 0, 0);
+			if (tracker.double_releases() != expected_unmatched || backing.bytes_free() != backing_before)
+			{
+				fuzz_dump(rng.s, "tracking", op, log[..], "duplicate release forwarded or miscounted");
+				return 1;
+			}
+		}
+		else if (roll < 90 && live_count > 0)
+		{
+			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			void* p = live[idx];
+			sz old_req = reqs[idx];
+			sz new_size = fuzz_size(&rng);
+			sz alignment = fuzz_alignment(&rng);
+			void*? grown = tracker.resize(p, new_size, alignment);
+			if (catch grown)
+			{
+				fuzz_log(log[..], op, FUZZ_RESIZE_FAIL, old_req, new_size);
+				char* bytes = (char*)p;
+				for (sz i = 0; i < old_req; i++)
+				{
+					if (bytes[i] != (char)i)
+					{
+						fuzz_dump(rng.s, "tracking", op, log[..], "failed resize damaged payload");
+						return 1;
+					}
+				}
+				continue;
+			}
+
+			fuzz_log(log[..], op, FUZZ_RESIZE_OK, old_req, new_size);
+			void* q = grown;
+			char* qbytes = (char*)q;
+			sz prefix = old_req < new_size ? old_req : new_size;
+			for (sz i = 0; i < prefix; i++)
+			{
+				if (qbytes[i] != (char)i)
+				{
+					fuzz_dump(rng.s, "tracking", op, log[..], "resize lost prefix");
+					return 1;
+				}
+			}
+			for (sz i = 0; i < new_size; i++) qbytes[i] = (char)i;
+
+			expected_sum += new_size - old_req;
+			live[idx] = q;
+			reqs[idx] = new_size;
+		}
+		else if (roll < 95)
+		{
+			// Hostile releases must not reach the backing allocator.
+			sz backing_before = backing.bytes_free();
+			tracker.release(foreign, false);
+			tracker.release(null, false);
+			expected_unmatched++;
+			fuzz_log(log[..], op, FUZZ_HOSTILE, 0, 0);
+			if (backing.bytes_free() != backing_before || tracker.live_count() != live_count)
+			{
+				fuzz_dump(rng.s, "tracking", op, log[..], "hostile release changed state");
+				return 1;
+			}
+		}
+		else
+		{
+			// Audit through the backing allocator's invariants.
+			fuzz_log(log[..], op, FUZZ_RESET, live_count, 0);
+			if (!backing.debug_verify())
+			{
+				fuzz_dump(rng.s, "tracking", op, log[..], "backing invariant violation");
+				return 1;
+			}
+		}
+	}
+	for (sz i = 0; i < live_count; i++) tracker.release(live[i], false);
+	if (!tracker.check_no_leaks() || tracker.live_count() != 0 || tracker.live_bytes() != 0)
+	{
+		fuzz_dump(rng.s, "tracking", iterations, log[..], "leaks remain");
+		return 1;
+	}
+
+	tracker.free();
 	return 0;
 }

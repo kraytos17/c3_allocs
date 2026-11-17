@@ -602,3 +602,39 @@ fn void backed_arena_owns_covers_both_paths() @test
 	assert(!arena.owns(overflow));
 	assert(arena.owns(initial));
 }
+
+fn void backed_arena_grown_pooled_page_tracks_moved_block() @test
+{
+	char[16] initial_storage = { };
+	char[65536] backing_storage = { };
+	allocators::ArenaAllocator backing;
+	backing.init(backing_storage[..]);
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], &backing);
+
+	sz mark = arena.mark();
+	void* first = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	void* second = arena.acquire(32, alloc::AllocInitType.NO_ZERO)!!;
+	arena.reset_retaining(mark);
+	assert(arena.page_pool_count() == 2);
+
+	// Reuses the first pooled page whose block is too small, growing it
+	// through the backing allocator. That block is not the backing
+	// arena's last, so the growth moves, and the page must track the
+	// moved block: releasing it has to return the grown block.
+	sz backing_parked = backing.bytes_reserved();
+	char* big = arena.acquire(512, alloc::AllocInitType.NO_ZERO)!!;
+	for (sz i = 0; i < 512; i++) big[i] = (char)i;
+	assert(arena.page_pool_count() == 1);
+	assert(backing.bytes_reserved() > backing_parked);
+
+	arena.release(big, false);
+	assert(backing.bytes_reserved() == backing_parked);
+
+	(void)first;
+	(void)second;
+	arena.clear();
+	arena.free();
+	assert(arena.overflow_count() == 0);
+	assert(arena.page_pool_count() == 0);
+}

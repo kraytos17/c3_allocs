@@ -477,6 +477,7 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 				*moved = *pooled;
 				*pool_link = pooled.next;
 				pooled = moved;
+				pooled.descriptor_block = grown;
 			}
 
 			pooled.block_size = total_size;

@@ -25,6 +25,8 @@ fn int main(String[] args)
 	char[4096] backed_initial;
 	char[65536] backed_backing;
 	char[8192] scratch_storage;
+	char[8192] arena_storage;
+	char[16384] tracking_storage;
 
 	int failures = 0;
 	int rc = fuzz_common::fuzz_freelist(freelist_storage[..], base, iterations, max_live);
@@ -53,6 +55,14 @@ fn int main(String[] args)
 
 	rc = fuzz_common::fuzz_scratch(scratch_storage[..], base, iterations, max_live);
 	io::printf("scratch: %s\n", rc == 0 ? "PASS" : "FAIL");
+	failures += rc;
+
+	rc = fuzz_common::fuzz_arena(arena_storage[..], base, iterations, max_live);
+	io::printf("arena: %s\n", rc == 0 ? "PASS" : "FAIL");
+	failures += rc;
+
+	rc = fuzz_common::fuzz_tracking(tracking_storage[..], base, iterations, max_live);
+	io::printf("tracking: %s\n", rc == 0 ? "PASS" : "FAIL");
 	failures += rc;
 	if (failures == 0)
 	{

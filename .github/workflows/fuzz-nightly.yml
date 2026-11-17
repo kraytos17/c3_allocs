@@ -31,9 +31,9 @@ jobs:
           honggfuzz --version || true
           cat /proc/sys/kernel/perf_event_paranoid
 
-      - name: Run honggfuzz session
+      - name: Run honggfuzz session (coverage-guided)
         timeout-minutes: 30
-        run: make fuzz-hf HF_N=100000 HF_TIMEOUT=30
+        run: make fuzz-hf-cov HF_N=1000000 HF_TIMEOUT=600
 
       - name: Upload new coverage and crashes
         if: always()

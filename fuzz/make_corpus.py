@@ -3,18 +3,24 @@
 Each output file is a byte stream where every 8 bytes (little-endian)
 is one draw for the harness RNG in fuzz/fuzz_common.c3:
 
-- roll draw: op = r % 100 (acquire <55, release <85, resize <93,
-  hostile <96, audit otherwise)
+- roll draw: op = r % 100. Freelist map: <55 acquire, <85 release,
+  <90 resize, <93 hostile, <95 policy toggle, <97 clear, else audit.
+  Other allocators have their own maps (same draw, same idea).
 - size draw: r % 32 == 0 -> 0; r % 4 == 0 -> uniform 1 + next % 256;
-  otherwise EDGES[r % 24]
+  otherwise EDGES[r % 24].
 - align draw: r % 50 == 0 -> 3 (invalid); otherwise
-  ALIGNS[r % 7] = [0, 0, 8, 16, 16, 32, 64]
+  ALIGNS[r % 7] = [0, 0, 8, 16, 16, 32, 64].
+- init draw: r % 3 == 0 -> ZERO, otherwise NO_ZERO.
+- mask draw (honggfuzz entry only): first u64 % 10 selects one of the
+  9 scenarios (0 freelist, 1 pool, 2 buddy, 3 bitmap, 4 sizeclass,
+  5 backed, 6 scratch, 7 arena, 8 tracking) or all of them (9).
 
-The same stream feeds all seven allocator scenarios, each restarting
-from byte zero, so every file exercises every allocator.
+The same stream feeds every scenario, each restarting from byte zero
+(except the mask draw, consumed once up front). Deterministic: fixed
+PRNG seed, and `make_corpus.py --check` validates every file against
+the harness (exit 0 expected).
 
 Usage: make_corpus.py <outdir> [--check <fuzz_hf-binary>]
---check runs each file through the harness and requires exit 0.
 """
 
 import random
@@ -43,34 +49,33 @@ def size_draws(edge_idx):
     return [4, EDGES[edge_idx] - 1]  # uniform path: 1 + (v - 1)
 
 
-def motif(roll, size_edge=None, align_idx=None, extra=()):
-    """One op: roll draw + size draw + align draw + trailing draws."""
+def motif(roll, size_edge=9, align_idx=2, init=1, extra=()):
+    """One generic op: roll + size + align + init + trailing draws."""
     draws = [roll]
-    if size_edge is None:
-        draws.append(7)  # EDGES[7] == 16
-    elif isinstance(size_edge, int):
+    if isinstance(size_edge, int):
         draws.extend(size_draws(size_edge))
     else:
-        draws.extend(size_edge)  # raw draw list, e.g. uniform [4, v]
-    draws.append(2 if align_idx is None else align_idx)  # ALIGNS[2] == 8
+        draws.extend(size_edge)
+    draws.append(align_idx)
+    draws.append(init)
     draws.extend(extra)
     return draws
 
 
-ACQ_SMALL = motif(10, 7, 3)      # acquire 16 @16
+ACQ_SMALL = motif(10, 7, 3)      # acquire 16 @16, NO_ZERO
 ACQ_ODD = motif(20, 5, 2)        # acquire 9 @8 (odd size -> slack)
 ACQ_BIG = motif(30, 21, 6)       # acquire 65 @64
-ACQ_ZERO = motif(40, 0, 2)        # acquire 0 -> must fail cleanly
-ACQ_INVALIGN = motif(41, 7, 0)    # align draw 0 -> invalid 3, must fail
+ACQ_ZERO = motif(40, 7, 3)       # acquire 16 @16
+ACQ_ZERO[-1] = 0                 # ... with ZERO init
+ACQ_INVALIGN = motif(41, 7, 0)   # invalid alignment 3 -> must fail
 RSZ = motif(88, 13, 3)            # resize to 25 @16
+POL = [94, 0]                    # policy flip to FIRST_FIT
+POL_BEST = [94, 1]               # policy flip to BEST_FIT
+CLR = [96]                       # bulk clear op
 
 
 def guard_release(idx):
     return [60, idx, 100]  # release; guard draw 100 % 100 == 0 probes guard
-
-
-def hostile(pick):
-    return [94, pick]
 
 
 def build_files(rng):
@@ -85,8 +90,9 @@ def build_files(rng):
     files["acquire-fill"] = b"".join(u64(v) for v in ACQ_SMALL * 80)
     mixed = (ACQ_SMALL + ACQ_ODD + ACQ_BIG + ACQ_ZERO + ACQ_INVALIGN) * 24
     files["acquire-mixed"] = b"".join(u64(v) for v in mixed)
+    files["zero-init"] = b"".join(u64(v) for v in ACQ_ZERO * 60)
 
-    pre = ACQ_ODD * 60  # size 9 leaves canary slack, so probes fire
+    pre = ACQ_ODD * 60
     guard_ops = []
     for i in range(200):
         guard_ops += guard_release(i % 8)
@@ -94,27 +100,65 @@ def build_files(rng):
 
     hostile_ops = []
     for i in range(120):
-        hostile_ops += hostile(i % 4)
-    files["hostile"] = b"".join(u64(v) for v in pre + hostile_ops)
+        hostile_ops += [91, i % 6]
+    files["hostile"] = b"".join(u64(v) for v in [0] + pre + hostile_ops)
+
+    pacq = [10] + size_draws(9)
+    phostile = []
+    for _ in range(100):
+        phostile += [97]
+    files["pool-hostile"] = b"".join(u64(v) for v in [1] + pacq * 60 + phostile)
 
     files["resize-heavy"] = b"".join(u64(v) for v in pre + RSZ * 120)
 
+    files["policy-toggle"] = b"".join(
+        u64(v) for v in [0] + ACQ_SMALL * 40 + (POL + POL_BEST) * 30)
+    files["clear-heavy"] = b"".join(
+        u64(v) for v in [0] + (ACQ_SMALL * 20 + CLR) * 8)
+
     sweep = list(ACQ_SMALL) * 40
     for roll in range(100):
-        sweep += motif(roll, 9, 4)  # size 24 @32 through every branch
+        sweep += motif(roll, 9, 4)
     files["rolls-sweep"] = b"".join(u64(v) for v in sweep)
 
     sizes = []
     for i in range(24):
         sizes += motif(10, i, 2)
-    sizes += motif(10, 0, 2)  # zero-size acquire
+    sizes += motif(10, 0, 2)
     files["sizes-sweep"] = b"".join(u64(v) for v in sizes * 2)
 
     aligns = []
     for j in range(7):
-        aligns += motif(10, 9, j)  # size 24, every alignment class
-    aligns += motif(10, 9, 0)  # invalid alignment 3
+        aligns += motif(10, 9, j)
+    aligns += motif(10, 9, 0)
     files["aligns-sweep"] = b"".join(u64(v) for v in aligns * 8)
+
+    # Backed-arena positional machinery: mark / reset-retaining / prune.
+    bpre = []
+    for _ in range(40):
+        bpre += motif(10, 9, 2)
+    bops = []
+    for i in range(100):
+        bops += [87, i % 3]
+    files["reset-heavy"] = b"".join(u64(v) for v in [5] + bpre + bops)
+
+    # Arena mark/reset windows.
+    apre = []
+    for _ in range(40):
+        apre += motif(10, 9, 2)
+    aops = []
+    for i in range(100):
+        aops += [82, i % 2]
+    for _ in range(10):
+        aops += [90]
+    files["arena-mark"] = b"".join(u64(v) for v in [7] + apre + aops)
+
+    # One focused file per scenario (mask = first draw).
+    body = list(ACQ_SMALL) * 40
+    for roll in range(100):
+        body += motif(roll, 9, 4)
+    for k in range(10):
+        files[f"mask-{k}"] = b"".join(u64(v) for v in [k] + body)
 
     for name, nbytes in [("uniform-4k", 4096), ("uniform-16k", 16384),
                          ("uniform-64k", 65536)]:
