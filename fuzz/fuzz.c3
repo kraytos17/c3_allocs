@@ -27,6 +27,8 @@ fn int main(String[] args)
 	char[8192] scratch_storage;
 	char[8192] arena_storage;
 	char[16384] tracking_storage;
+	char[8192] chain_storage;
+	char[8192] chain_spare;
 
 	int failures = 0;
 	int rc = fuzz_common::fuzz_freelist(freelist_storage[..], base, iterations, max_live);
@@ -63,6 +65,10 @@ fn int main(String[] args)
 
 	rc = fuzz_common::fuzz_tracking(tracking_storage[..], base, iterations, max_live);
 	io::printf("tracking: %s\n", rc == 0 ? "PASS" : "FAIL");
+	failures += rc;
+
+	rc = fuzz_common::fuzz_poolchain(chain_storage[..], chain_spare[..], base, iterations, max_live);
+	io::printf("poolchain: %s\n", rc == 0 ? "PASS" : "FAIL");
 	failures += rc;
 	if (failures == 0)
 	{

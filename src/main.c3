@@ -27,6 +27,23 @@ fn int main(String[] args)
 	alloc::free(&pool, pool_item);
 	io::printf("pool after free: available=%d\n", pool.available());
 
+	char[2048] chain_first;
+	char[2048] chain_spare;
+	char[][1] chain_bufs = { chain_first[..] };
+	allocators::PoolChainAllocator chain;
+	chain.init(chain_bufs[..], 64, 16);
+	void* chain_item = alloc::malloc(&chain, 48);
+	io::printf(
+		"poolchain: links=%d capacity=%d available=%d\n",
+		chain.link_count(),
+		chain.capacity(),
+		chain.available()
+	);
+
+	alloc::free(&chain, chain_item);
+	chain.attach(chain_spare[..]);
+	io::printf("poolchain after attach: links=%d\n", chain.link_count());
+
 	char[1024] initial_storage;
 	char[8192] backing_storage;
 	allocators::ArenaAllocator backing;

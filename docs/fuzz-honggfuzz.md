@@ -18,16 +18,16 @@ Pinned working build: honggfuzz `01713bd` (Nov 2026), c3c 0.8.7 prerelease.
 
 ## How it works
 
-`fuzz/fuzz_common.c3` holds the nine allocator scenarios (freelist,
+`fuzz/fuzz_common.c3` holds the ten allocator scenarios (freelist,
 pool, buddy, bitmap buddy, size class, backed arena, scratch, arena,
-tracking). Each draws randomness from `FuzzRng`: with no input bytes it
-degrades to xorshift (the `make fuzz` smoke path); `fuzz/fuzz_hf.c3`
-loads honggfuzz's input file and each draw consumes 8 input bytes
-before falling back to xorshift. Same scenarios, same oracles
-(`debug_verify`, canary sampling, slot/byte accounting, guard
+tracking, pool chain). Each draws randomness from `FuzzRng`: with no
+input bytes it degrades to xorshift (the `make fuzz` smoke path);
+`fuzz/fuzz_hf.c3` loads honggfuzz's input file and each draw consumes
+8 input bytes before falling back to xorshift. Same scenarios, same
+oracles (`debug_verify`, canary sampling, slot/byte accounting, guard
 validation, positional-reset filtering, final restore) — only the
 randomness source changes. The first input draw selects one scenario
-(0-8) or all of them (9), so corpus files can focus on one allocator;
+(0-9) or all of them (10), so corpus files can focus on one allocator;
 an empty input runs everything.
 
 `make fuzz-hf` builds the harness in **persistent mode** (the default):

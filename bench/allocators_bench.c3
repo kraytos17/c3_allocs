@@ -16,6 +16,7 @@ char[BENCH_BUFFER] scratch_storage;
 char[BENCH_BUFFER] tracking_storage;
 char[BENCH_BUFFER] backed_initial;
 char[BENCH_BUFFER] backed_backing;
+char[BENCH_BUFFER] chain_storage;
 
 fn void bench_arena_acquire_release() @benchmark
 {
@@ -102,6 +103,19 @@ fn void bench_bitmap_buddy_sixteen_acquire_release() @benchmark
 		void*? ptr_opt = buddy.acquire(16, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		buddy.release(ptr_opt, false);
+	}
+}
+
+fn void bench_poolchain_acquire_release() @benchmark
+{
+	char[][2] bufs = { chain_storage[0 : BENCH_BUFFER / 2], chain_storage[BENCH_BUFFER / 2 : BENCH_BUFFER / 2] };
+	allocators::PoolChainAllocator chain;
+	chain.init(bufs[..], 64);
+	for (sz i = 0; i < BENCH_OPS; i++)
+	{
+		void*? ptr_opt = chain.acquire(64, alloc::AllocInitType.NO_ZERO);
+		if (catch ptr_opt) return;
+		chain.release(ptr_opt, false);
 	}
 }
 

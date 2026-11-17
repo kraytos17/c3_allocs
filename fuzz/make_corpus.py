@@ -11,9 +11,9 @@ is one draw for the harness RNG in fuzz/fuzz_common.c3:
 - align draw: r % 50 == 0 -> 3 (invalid); otherwise
   ALIGNS[r % 7] = [0, 0, 8, 16, 16, 32, 64].
 - init draw: r % 3 == 0 -> ZERO, otherwise NO_ZERO.
-- mask draw (honggfuzz entry only): first u64 % 10 selects one of the
-  9 scenarios (0 freelist, 1 pool, 2 buddy, 3 bitmap, 4 sizeclass,
-  5 backed, 6 scratch, 7 arena, 8 tracking) or all of them (9).
+- mask draw (honggfuzz entry only): first u64 % 11 selects one of the
+  10 scenarios (0 freelist, 1 pool, 2 buddy, 3 bitmap, 4 sizeclass,
+  5 backed, 6 scratch, 7 arena, 8 tracking, 9 poolchain) or all (10).
 
 The same stream feeds every scenario, each restarting from byte zero
 (except the mask draw, consumed once up front). Deterministic: fixed
@@ -157,8 +157,14 @@ def build_files(rng):
     body = list(ACQ_SMALL) * 40
     for roll in range(100):
         body += motif(roll, 9, 4)
-    for k in range(10):
+    for k in range(11):
         files[f"mask-{k}"] = b"".join(u64(v) for v in [k] + body)
+
+    # Pool-chain attach flow: fill the first link, then attach spares.
+    chain_ops = list(motif(10, 9, 2, 1)) * 40
+    for _ in range(40):
+        chain_ops += [93]
+    files["chain-attach"] = b"".join(u64(v) for v in [9] + chain_ops)
 
     for name, nbytes in [("uniform-4k", 4096), ("uniform-16k", 16384),
                          ("uniform-64k", 65536)]:

@@ -113,11 +113,11 @@ fn FuzzRng fuzz_rng_hf_stream(ulong seed, char[] bytes, usz* mask)
 	if (bytes.len >= 8)
 	{
 		ulong m = fuzz_next(&rng);
-		*mask = (usz)(m % 10);
+		*mask = (usz)(m % 11);
 	}
 	else
 	{
-		*mask = 9;
+		*mask = 10;
 	}
 	return rng;
 }
@@ -1487,5 +1487,177 @@ fn int fuzz_tracking(char[] storage, FuzzRng base, sz iterations, sz max_live)
 	}
 
 	tracker.free();
+	return 0;
+}
+
+fn int fuzz_poolchain(char[] storage, char[] spare, FuzzRng base, sz iterations, sz max_live)
+{
+	char[][2] bufs = { storage[0:storage.len / 2], storage[storage.len / 2:storage.len / 2] };
+	allocators::PoolChainAllocator chain;
+	chain.init(bufs[..], 64, 0);
+	sz spare_next = 0;
+
+	FuzzRng rng = base;
+	if (rng.s == 0) rng.s = 0xC4A17AC4A17;
+
+	void*[FUZZ_MAXLIVE] live = { };
+	sz[FUZZ_MAXLIVE] reqs = { };
+	sz live_count = 0;
+	FuzzOp[FUZZ_LOG_SIZE] log = { };
+	for (sz op = 0; op < iterations && (rng.bytes.len == 0 || rng.pos < rng.bytes.len); op++)
+	{
+		if (chain.available() + live_count != chain.capacity())
+		{
+			fuzz_dump(rng.s, "poolchain", op, log[..], "slot accounting drift");
+			return 1;
+		}
+
+		ulong roll = fuzz_next(&rng) % 100;
+		if (roll < 55 && live_count < max_live)
+		{
+			sz size = fuzz_size(&rng);
+			if (size <= 0) size = 1;
+
+			sz alignment = fuzz_alignment(&rng);
+			sz available_before = chain.available();
+			void*? got = chain.acquire(size, fuzz_init_type(&rng), alignment);
+			if (catch got)
+			{
+				fuzz_log(log[..], op, FUZZ_ACQUIRE_FAIL, size, alignment);
+				if (chain.available() != available_before)
+				{
+					fuzz_dump(rng.s, "poolchain", op, log[..], "failed acquire changed state");
+					return 1;
+				}
+				continue;
+			}
+
+			void* p = got;
+			fuzz_log(log[..], op, FUZZ_ACQUIRE_OK, size, alignment);
+			if (!chain.owns(p) || !chain.canary_intact(p))
+			{
+				fuzz_dump(rng.s, "poolchain", op, log[..], "bad fresh slot");
+				return 1;
+			}
+
+			char* bytes = (char*)p;
+			for (sz i = 0; i < size && i < 64; i++) bytes[i] = (char)i;
+
+			live[live_count] = p;
+			reqs[live_count] = size;
+			live_count++;
+		}
+		else if (roll < 85 && live_count > 0)
+		{
+			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			chain.release(live[idx], false);
+			fuzz_log(log[..], op, FUZZ_RELEASE, reqs[idx], 0);
+			live[idx] = live[live_count - 1];
+			reqs[idx] = reqs[live_count - 1];
+			live_count--;
+		}
+		else if (roll < 90 && live_count > 0)
+		{
+			sz idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			void* p = live[idx];
+			sz old_req = reqs[idx];
+			sz new_size = 1 + (sz)(fuzz_next(&rng) % 96);
+			void*? grown = chain.resize(p, new_size, fuzz_alignment(&rng));
+			if (catch grown)
+			{
+				fuzz_log(log[..], op, FUZZ_RESIZE_FAIL, old_req, new_size);
+				if (!chain.canary_intact(p) || !chain.owns(p))
+				{
+					fuzz_dump(rng.s, "poolchain", op, log[..], "failed resize damaged slot");
+					return 1;
+				}
+				continue;
+			}
+
+			fuzz_log(log[..], op, FUZZ_RESIZE_OK, old_req, new_size);
+			if (grown != p)
+			{
+				fuzz_dump(rng.s, "poolchain", op, log[..], "chain resize moved");
+				return 1;
+			}
+			reqs[idx] = new_size;
+		}
+		else if (roll < 93 && live_count > 0)
+		{
+			sz dup_idx = (sz)(fuzz_next(&rng) % (ulong)live_count);
+			void* dup = live[dup_idx];
+			live[dup_idx] = live[live_count - 1];
+			reqs[dup_idx] = reqs[live_count - 1];
+			live_count--;
+			chain.release(dup, false);
+			sz available_before = chain.available();
+			chain.release(dup, false);
+			fuzz_log(log[..], op, FUZZ_HOSTILE, 0, 0);
+			if (chain.available() != available_before)
+			{
+				fuzz_dump(rng.s, "poolchain", op, log[..], "duplicate release changed state");
+				return 1;
+			}
+		}
+		else if (roll < 95)
+		{
+			// Attach a fresh spare buffer as a new link. Past the link
+			// limit attach must refuse without changing the chain.
+			if (chain.link_count() >= allocators::POOL_CHAIN_MAX)
+			{
+				char[64] dummy;
+				sz links_before = chain.link_count();
+				sz available_before = chain.available();
+				if (chain.attach(dummy[..]))
+				{
+					fuzz_dump(rng.s, "poolchain", op, log[..], "attach past limit succeeded");
+					return 1;
+				}
+
+				fuzz_log(log[..], op, FUZZ_RESET, 0, 0);
+				if (chain.link_count() != links_before || chain.available() != available_before)
+				{
+					fuzz_dump(rng.s, "poolchain", op, log[..], "refused attach changed state");
+					return 1;
+				}
+			}
+			else if (spare_next + 1024 <= spare.len)
+			{
+				sz links_before = chain.link_count();
+				if (!chain.attach(spare[spare_next:1024]))
+				{
+					fuzz_dump(rng.s, "poolchain", op, log[..], "attach with room failed");
+					return 1;
+				}
+
+				spare_next += 1024;
+				fuzz_log(log[..], op, FUZZ_RESET, 1, 0);
+				if (chain.link_count() != links_before + 1 || !chain.debug_verify())
+				{
+					fuzz_dump(rng.s, "poolchain", op, log[..], "attach misbehaved");
+					return 1;
+				}
+			}
+			else
+			{
+				fuzz_log(log[..], op, FUZZ_RESET, 2, 0);
+			}
+		}
+		else
+		{
+			fuzz_log(log[..], op, FUZZ_RESET, live_count, 0);
+			if (!chain.debug_verify())
+			{
+				fuzz_dump(rng.s, "poolchain", op, log[..], "invariant violation");
+				return 1;
+			}
+		}
+	}
+	for (sz i = 0; i < live_count; i++) chain.release(live[i], false);
+	if (chain.available() != chain.capacity() || !chain.debug_verify())
+	{
+		fuzz_dump(rng.s, "poolchain", iterations, log[..], "final restore failed");
+		return 1;
+	}
 	return 0;
 }

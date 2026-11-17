@@ -5,13 +5,17 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains nine allocators and one debug wrapper:
+The repository currently contains ten allocators and one debug wrapper:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
   last-allocation release, and mark/reset bulk reclamation.
 - **`PoolAllocator`** — a fixed-capacity pool that divides caller-provided
   storage into equal-sized slots and reuses individual slots after release.
+- **`PoolChainAllocator`** — a chain of fixed-size pools over up to
+  `POOL_CHAIN_MAX` caller-provided buffers. Each request is served from
+  the first link with a free slot, so capacity grows by attaching more
+  buffers instead of failing.
 - **`BackedArenaAllocator`** — an arena that starts in a caller-provided buffer
   and obtains individual overflow blocks from a backing allocator. It supports
   marks and frees overflow blocks when resetting to an earlier mark.
@@ -121,12 +125,13 @@ Each benchmark performs a fixed batch of operations per iteration, so the
 reported average is per batch, not per allocation:
 
 - `bench_freelist_*_acquire_release` — hot-path acquire/release pairs for
-  the arena, backed arena, free-list, buddy, bitmap buddy, pool, and
-  size-class dispatch. The free-list pair covers both policies: `FIRST_FIT`
-  (default) and `BEST_FIT`, which scans every range before choosing. The
-  bitmap buddy pair contrasts 64-byte and 16-byte requests, and the
-  tracking bench shows the debug wrapper's overhead over the plain
-  free-list path.
+  the arena, backed arena, free-list, buddy, bitmap buddy, pool, pool
+  chain, and size-class dispatch. The free-list pair covers both policies:
+  `FIRST_FIT` (default) and `BEST_FIT`, which scans every range before
+  choosing. The bitmap buddy pair contrasts 64-byte and 16-byte requests,
+  and the tracking bench shows the debug wrapper's overhead over the plain
+  free-list path. The pool chain bench stays on the first link, so it
+  measures the routing overhead over a plain pool.
 - `bench_*_clear_cycle` — fill then bulk reset for arena, buddy, free-list,
   and scratch, measuring the O(1) bulk-reclaim cost.
 - `bench_freelist_fragmented_release` — release alternating blocks to
@@ -141,21 +146,22 @@ One reference run on my machine (64-byte requests unless noted, batches of
 
 | Benchmark                            | Avg per batch |
 | ------------------------------------ | ------------- |
-| arena acquire/release                | 0.35 us       |
-| backed arena acquire/release         | 0.50 us       |
-| pool acquire/release                 | 0.77 us       |
-| free-list first-fit acquire/release  | 0.96 us       |
-| free-list best-fit acquire/release   | 0.96 us       |
-| tracking over free-list acquire/release | 2.63 us    |
-| size-class acquire/release           | 1.51 us       |
-| buddy acquire/release                | 1.60 us       |
-| bitmap buddy acquire/release         | 3.34 us       |
-| bitmap buddy 16-byte acquire/release | 3.79 us       |
-| arena clear cycle                    | 0.25 us       |
-| scratch clear cycle                  | 0.31 us       |
-| free-list clear cycle                | 0.59 us       |
-| buddy clear cycle                    | 0.67 us       |
-| free-list fragmented release         | 0.98 us       |
+| arena acquire/release                | 0.36 us       |
+| backed arena acquire/release         | 0.52 us       |
+| pool acquire/release                 | 1.55 us       |
+| pool chain acquire/release           | 1.60 us       |
+| free-list first-fit acquire/release  | 1.09 us       |
+| free-list best-fit acquire/release   | 0.93 us       |
+| tracking over free-list acquire/release | 2.56 us    |
+| size-class acquire/release           | 2.11 us       |
+| buddy acquire/release                | 1.74 us       |
+| bitmap buddy acquire/release         | 4.00 us       |
+| bitmap buddy 16-byte acquire/release | 5.49 us       |
+| arena clear cycle                    | 0.27 us       |
+| scratch clear cycle                  | 0.33 us       |
+| free-list clear cycle                | 0.58 us       |
+| buddy clear cycle                    | 0.72 us       |
+| free-list fragmented release         | 1.05 us       |
 
 The numbers are from an `-O2` build (`make bench` now passes `-O2` to the
 compiler); auto-vectorization pays off across the board. The bitmap buddy
@@ -184,6 +190,7 @@ ignored. All hold at every optimization level.
 | Grouped lifetimes with nested rewind              | `ArenaAllocator`      |
 | Mostly-fits buffer with occasional overflow       | `BackedArenaAllocator`|
 | One fixed size, O(1) release, stable pointers     | `PoolAllocator`       |
+| One fixed size, but capacity must grow at runtime | `PoolChainAllocator`  |
 | Typed slots derived from a struct                 | `TypedPool{Type}`     |
 | Mixed small sizes with bounded waste              | `SizeClassAllocator`  |
 | General variable sizes inside one buffer          | `FreeListAllocator`   |
@@ -315,6 +322,48 @@ alloc::free(&pool, item); // The released slot can be reused.
   corrupted canary fails the resize with `INVALID_ALLOC_SIZE`.
 - The pool is not thread-safe and does not run destructors for values stored
   in its memory.
+
+## Using `PoolChainAllocator`
+
+`PoolChainAllocator` extends the pool with spillover: it manages up to
+`POOL_CHAIN_MAX` fixed-size links and serves each request from the first
+link with a free slot. When every link is full, attach another buffer
+with `attach` instead of failing.
+
+```c3
+import std::core::mem::alloc;
+import c3_allocs::allocators;
+
+char[4096] first_storage;
+char[4096] spare_storage;
+char[][1] bufs = { first_storage[..] };
+allocators::PoolChainAllocator chain;
+chain.init(bufs[..], 64, 16); // 64-byte payloads, up to 16-byte alignment.
+
+void* item = alloc::malloc(&chain, 48);
+// Use item while the buffers and chain remain alive.
+alloc::free(&chain, item); // The slot returns to whichever link owns it.
+chain.attach(spare_storage[..]); // Adds a second link when needed.
+```
+
+### Pool chain behavior and constraints
+
+- The chain borrows one buffer per link; every buffer must outlive the
+  chain and its allocations. `attach` borrows the same way.
+- All links share the block size and alignment, so any slot serves any
+  request and blocks never move between links. `payload_size()` reports
+  the shared size; `capacity()` and `available()` sum across links.
+- `link_count()` reports the configured links, `link_capacity(i)` and
+  `link_available(i)` inspect one link (zero for a bad index).
+- `acquire` scans links in order and uses the first free slot. Requests
+  larger than the block size report `INVALID_ALLOC_SIZE`; a full chain
+  reports `OUT_OF_MEMORY`. `init` with no usable buffers, and `attach`
+  past the link limit, leave the chain (or fail) without changing state.
+- `release` routes to the owning link; null, foreign, interior, and
+  duplicate releases are ignored. `owns()` and `canary_intact()` route
+  the same way; `debug_verify()` checks every link.
+- `resize` stays in the owning link's slot, exactly like a pool resize.
+- The chain is not thread-safe and does not run destructors.
 
 ## Using `BackedArenaAllocator`
 
@@ -674,6 +723,7 @@ similar to mimalloc's debug mode:
 - `src/allocators/common.c3` — shared alignment helpers.
 - `src/allocators/arena.c3` — the arena implementation.
 - `src/allocators/pool.c3` — the fixed-slot pool implementation.
+- `src/allocators/poolchain.c3` — the chained pool implementation.
 - `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.
 - `src/allocators/freelist.c3` — the variable-size free-list implementation.
 - `src/allocators/buddy.c3` — the binary buddy allocator.
@@ -695,7 +745,8 @@ similar to mimalloc's debug mode:
   `test/freelist_test.c3`, `test/buddy_test.c3`,
   `test/bitmap_buddy_test.c3`, `test/sizeclass_test.c3`,
   `test/scratch_test.c3`, `test/debug_test.c3`, `test/tracking_test.c3`,
-  `test/common_test.c3`, `test/stress_test.c3`, and
+  `test/common_test.c3`, `test/stress_test.c3`,
+  `test/poolchain_test.c3`, and
   `test/hardening_test.c3` — allocator behavior, failure-path, storm,
   alignment-torture, and canary-guard tests.
 - `project.json` — C3 compiler project configuration.

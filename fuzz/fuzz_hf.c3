@@ -39,35 +39,37 @@ fn CInt fuzz_test_one_input(char* buf, usz len) @cname("c3_fuzz_one_input") @nos
 	char[8192] scratch_storage;
 	char[8192] arena_storage;
 	char[16384] tracking_storage;
+	char[8192] chain_storage;
+	char[8192] chain_spare;
 
 	int failures = 0;
 	int rc;
-	if (mask == 9 || mask == 0)
+	if (mask == 10 || mask == 0)
 	{
 		rc = fuzz_common::fuzz_freelist(freelist_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 1)
+	if (mask == 10 || mask == 1)
 	{
 		rc = fuzz_common::fuzz_pool(pool_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 2)
+	if (mask == 10 || mask == 2)
 	{
 		rc = fuzz_common::fuzz_buddy(buddy_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 3)
+	if (mask == 10 || mask == 3)
 	{
 		rc = fuzz_common::fuzz_bitmap_buddy(bitmap_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 4)
+	if (mask == 10 || mask == 4)
 	{
 		rc = fuzz_common::fuzz_sizeclass(class_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 5)
+	if (mask == 10 || mask == 5)
 	{
 		rc = fuzz_common::fuzz_backed_arena(
 			backed_initial[..],
@@ -78,19 +80,30 @@ fn CInt fuzz_test_one_input(char* buf, usz len) @cname("c3_fuzz_one_input") @nos
 		);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 6)
+	if (mask == 10 || mask == 6)
 	{
 		rc = fuzz_common::fuzz_scratch(scratch_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 7)
+	if (mask == 10 || mask == 7)
 	{
 		rc = fuzz_common::fuzz_arena(arena_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
 		failures += rc;
 	}
-	if (mask == 9 || mask == 8)
+	if (mask == 10 || mask == 8)
 	{
 		rc = fuzz_common::fuzz_tracking(tracking_storage[..], base, HF_PERSISTENT_ITERATIONS, HF_PERSISTENT_MAXLIVE);
+		failures += rc;
+	}
+	if (mask == 10 || mask == 9)
+	{
+		rc = fuzz_common::fuzz_poolchain(
+			chain_storage[..],
+			chain_spare[..],
+			base,
+			HF_PERSISTENT_ITERATIONS,
+			HF_PERSISTENT_MAXLIVE
+		);
 		failures += rc;
 	}
 	// A nonzero return would only make libhfuzz exit(1): not counted as a
@@ -125,6 +138,8 @@ fn int fuzz_hf_file(String path, sz iterations, sz max_live)
 	char[8192] scratch_storage;
 	char[8192] arena_storage;
 	char[16384] tracking_storage;
+	char[8192] chain_storage;
+	char[8192] chain_spare;
 
 	int failures = 0;
 	int rc = fuzz_common::fuzz_freelist(freelist_storage[..], base, iterations, max_live);
@@ -161,6 +176,10 @@ fn int fuzz_hf_file(String path, sz iterations, sz max_live)
 
 	rc = fuzz_common::fuzz_tracking(tracking_storage[..], base, iterations, max_live);
 	io::printf("tracking: %s\n", rc == 0 ? "PASS" : "FAIL");
+	failures += rc;
+
+	rc = fuzz_common::fuzz_poolchain(chain_storage[..], chain_spare[..], base, iterations, max_live);
+	io::printf("poolchain: %s\n", rc == 0 ? "PASS" : "FAIL");
 	failures += rc;
 	if (failures == 0)
 	{
