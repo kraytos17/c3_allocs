@@ -309,3 +309,35 @@ fn void pool_payload_size_and_ownership_queries() @test
 	pool.release(item, false);
 	assert(pool.owns(item));
 }
+
+fn void typed_pool_derives_layout_from_type() @test
+{
+	char[512] storage;
+	allocators::TypedPool{PoolTestPoint} pool;
+	pool.init(storage[..]);
+	assert(pool.capacity() > 0);
+	assert(pool.available() == pool.capacity());
+
+	PoolTestPoint*? first_opt = pool.acquire();
+	if (catch first_opt)
+	{
+		assert(false, "Expected typed pool acquisition to succeed.");
+	}
+	PoolTestPoint* first = first_opt;
+	first.x = 10;
+	first.y = 20;
+	assert(first.x + first.y == 30);
+	assert(pool.owns(first));
+	assert(pool.available() == pool.capacity() - 1);
+
+	pool.release(first);
+	assert(pool.available() == pool.capacity());
+	PoolTestPoint*? reused_opt = pool.acquire(alloc::AllocInitType.ZERO);
+	if (catch reused_opt)
+	{
+		assert(false, "Expected typed pool reuse to succeed.");
+	}
+	PoolTestPoint* reused = reused_opt;
+	assert(reused == first);
+	assert(reused.x == 0 && reused.y == 0);
+}
