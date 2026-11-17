@@ -22,6 +22,8 @@ The repository currently contains seven allocators:
 - **`SizeClassAllocator`** — a dispatcher that routes requests to the
   smallest fitting fixed-size pool. It bounds waste for mixed sizes while
   keeping pool O(1) release and stable pointers.
+- **`TypedPool{Type}`** — a generic wrapper that derives slot size and
+  alignment from a type, returning typed pointers from `acquire`.
 - **`ScratchAllocator`** — a single-frame allocator wrapping an arena with
   a high-water mark for tuning frame buffer sizes.
 - **`BuddyAllocator`** — a binary buddy allocator over caller-owned memory.
@@ -52,6 +54,7 @@ make             # Show available targets (the default)
 make build       # Compile the executable
 make run         # Build and run the executable
 make test        # Run the C3 test suite
+make bench       # Run the allocator benchmarks
 make fmt-check   # Check C3 formatting without changing files
 make fmt         # Format C3 files in place
 make check       # Run fmt-check, test, and build in sequence
@@ -61,6 +64,23 @@ make clean       # Remove C3 build artifacts
 `make all` is an alias for `make build`. Build outputs are written under
 `build/`. The `make fmt` target edits files in `src/` and `test/`; review its
 changes before committing them. Formatting rules are in the root `.c3fmt` file.
+
+## Benchmarks
+
+`make bench` runs `bench/allocators_bench.c3` through `c3c compile-benchmark`.
+Each benchmark performs a fixed batch of operations per iteration, so the
+reported average is per batch, not per allocation:
+
+- `bench_*_acquire_release` — hot-path acquire/release pairs for the arena,
+  backed arena, free-list, buddy, pool, and size-class dispatch.
+- `bench_*_clear_cycle` — fill then bulk reset for arena, buddy, free-list,
+  and scratch, measuring the O(1) bulk-reclaim cost.
+- `bench_freelist_fragmented_release` — release alternating blocks to
+  exercise split/merge churn on the free list.
+
+Numbers vary by machine; compare within one run rather than across runs.
+Per-allocation overhead is observable through the byte stats instead
+(`bytes_reserved` vs payload, `bytes_used` vs `bytes_free`).
 
 ## Using `ArenaAllocator`
 
@@ -374,7 +394,17 @@ alloc::free(&buddy, item); // Merges with its free buddy when possible.
   stay `@local`.
 - Use the standard `alloc::new` / `alloc::new_try` macros for typed
   allocation; they derive size and alignment from the type. For pools, use
-  `pool_init_for{Type}(&pool, storage[..])` to size slots from a type.
+  `pool_init_for{Type}(&pool, storage[..])` to size slots from a type, or
+  `TypedPool{Type}` for a fully typed facade:
+
+```c3
+allocators::TypedPool{PoolTestPoint} pool;
+pool.init(storage[..]);
+PoolTestPoint*? point_opt = pool.acquire();
+if (catch point_opt) return;
+PoolTestPoint* point = point_opt;
+pool.release(point);
+```
 
 ## Repository layout
 
@@ -386,7 +416,9 @@ alloc::free(&buddy, item); // Merges with its free buddy when possible.
 - `src/allocators/buddy.c3` — the binary buddy allocator.
 - `src/allocators/sizeclass.c3` — the size-class dispatcher over pools.
 - `src/allocators/scratch.c3` — the single-frame scratch allocator.
+- `src/allocators/typed.c3` — the generic typed pool facade.
 - `src/main.c3` — executable entry point.
+- `bench/allocators_bench.c3` — allocator benchmarks run by `make bench`.
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
   `test/freelist_test.c3`, `test/buddy_test.c3`,
   `test/sizeclass_test.c3`,
