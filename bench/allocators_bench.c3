@@ -13,6 +13,7 @@ char[BENCH_BUFFER] buddy_storage;
 char[BENCH_BUFFER] bitmap_buddy_storage;
 char[BENCH_BUFFER] class_storage;
 char[BENCH_BUFFER] scratch_storage;
+char[BENCH_BUFFER] tracking_storage;
 char[BENCH_BUFFER] backed_initial;
 char[BENCH_BUFFER] backed_backing;
 
@@ -51,6 +52,21 @@ fn void bench_freelist_bestfit_acquire_release() @benchmark
 		if (catch ptr_opt) return;
 		list.release(ptr_opt, false);
 	}
+}
+
+fn void bench_tracking_freelist_acquire_release() @benchmark
+{
+	allocators::FreeListAllocator list;
+	list.init(tracking_storage[..]);
+	allocators::TrackingAllocator tracker;
+	tracker.init(&list);
+	for (sz i = 0; i < BENCH_OPS; i++)
+	{
+		void*? ptr_opt = allocators::trk_malloc(&tracker, 64);
+		if (catch ptr_opt) return;
+		allocators::trk_free(&tracker, ptr_opt);
+	}
+	tracker.free();
 }
 
 fn void bench_buddy_acquire_release() @benchmark

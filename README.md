@@ -5,7 +5,7 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains nine allocators:
+The repository currently contains nine allocators and one debug wrapper:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
@@ -35,6 +35,11 @@ The repository currently contains nine allocators:
   headers, so a 16-byte request consumes exactly 16 bytes. The block order
   is recovered from the split bits on release. It trades the per-request
   trailing canary for that header saving.
+- **`TrackingAllocator`** — a debug wrapper that records every acquire,
+  resize, and release through it. The `trk_malloc`/`trk_calloc`/
+  `trk_realloc`/`trk_free` macros capture the call site via the `$$FILE` /
+  `$$FUNC` / `$$LINE` builtins, leaks are reported with those sites, and
+  double releases are detected without reaching the wrapped allocator.
 
 ## Requirements
 
@@ -80,7 +85,9 @@ reported average is per batch, not per allocation:
   the arena, backed arena, free-list, buddy, bitmap buddy, pool, and
   size-class dispatch. The free-list pair covers both policies: `FIRST_FIT`
   (default) and `BEST_FIT`, which scans every range before choosing. The
-  bitmap buddy pair contrasts 64-byte and 16-byte requests.
+  bitmap buddy pair contrasts 64-byte and 16-byte requests, and the
+  tracking bench shows the debug wrapper's overhead over the plain
+  free-list path.
 - `bench_*_clear_cycle` — fill then bulk reset for arena, buddy, free-list,
   and scratch, measuring the O(1) bulk-reclaim cost.
 - `bench_freelist_fragmented_release` — release alternating blocks to
@@ -95,24 +102,27 @@ One reference run on my machine (64-byte requests unless noted, batches of
 
 | Benchmark                            | Avg per batch |
 | ------------------------------------ | ------------- |
-| arena acquire/release                | 1.46 us       |
-| backed arena acquire/release         | 2.03 us       |
-| pool acquire/release                 | 3.07 us       |
-| free-list first-fit acquire/release  | 3.30 us       |
-| free-list best-fit acquire/release   | 3.44 us       |
-| size-class acquire/release           | 10.71 us      |
-| buddy acquire/release                | 12.35 us      |
-| bitmap buddy acquire/release         | 18.66 us      |
-| bitmap buddy 16-byte acquire/release | 21.68 us      |
-| arena clear cycle                    | 0.99 us       |
-| scratch clear cycle                  | 1.39 us       |
-| free-list clear cycle                | 1.83 us       |
-| buddy clear cycle                    | 3.72 us       |
-| free-list fragmented release         | 6.81 us       |
+| arena acquire/release                | 1.60 us       |
+| backed arena acquire/release         | 2.06 us       |
+| pool acquire/release                 | 3.02 us       |
+| free-list first-fit acquire/release  | 3.48 us       |
+| free-list best-fit acquire/release   | 3.54 us       |
+| tracking over free-list acquire/release | 5.84 us    |
+| size-class acquire/release           | 10.87 us      |
+| buddy acquire/release                | 12.27 us      |
+| bitmap buddy acquire/release         | 18.34 us      |
+| bitmap buddy 16-byte acquire/release | 21.22 us      |
+| arena clear cycle                    | 1.00 us       |
+| scratch clear cycle                  | 1.37 us       |
+| free-list clear cycle                | 1.79 us       |
+| buddy clear cycle                    | 3.65 us       |
+| free-list fragmented release         | 6.75 us       |
 
 The bitmap buddy is slower per operation than the headered one because
 release must walk the split bits to recover the order; its win is zero
-per-allocation metadata, which matters only for tiny requests.
+per-allocation metadata, which matters only for tiny requests. Tracking
+adds about 1.7x over the plain free-list hot path, the price of the
+per-allocation record bookkeeping in a debug wrapper.
 
 ## Choosing an allocator
 
@@ -355,6 +365,45 @@ list.clear(); // Discards all allocations at once.
   `largest_free` fail even when `bytes_free` is bigger.
 - The allocator is not thread-safe and does not run destructors.
 
+## Using `TrackingAllocator`
+
+`TrackingAllocator` wraps any allocator (the wrapped allocator is stored as
+an `Allocator` interface value) and records every acquire, resize, and
+release. The `trk_*` macros capture the call site; direct interface calls
+are tracked with an unknown site.
+
+```c3
+import std::core::mem::allocators;
+import c3_allocs::allocators;
+
+allocators::FreeListAllocator list;
+list.init(storage[..]);
+
+allocators::TrackingAllocator tracker;
+tracker.init(&list);
+
+void*? item_opt = allocators::trk_malloc(&tracker, 48);
+if (catch item_opt) return;
+allocators::trk_free(&tracker, item_opt);
+
+if (!tracker.check_no_leaks()) tracker.report_leaks();
+tracker.free();
+```
+
+### Tracking behavior and constraints
+
+- `live_count()`, `live_bytes()`, and `total_count()` report running
+  totals; `double_releases()` counts releases that did not match a live
+  tracked pointer.
+- Unmatched releases are not forwarded to the wrapped allocator, which
+  keeps a double release from tripping the backing allocator's own
+  detection.
+- `report_leaks()` prints one line per live allocation with its recorded
+  file, function, and line; `check_no_leaks()` is the boolean form.
+- The record array is served by the wrapped allocator and grows by
+  doubling. `free()` releases it; check for leaks first.
+- The wrapper is not thread-safe.
+
 ## Using `SizeClassAllocator`
 
 `SizeClassAllocator` routes mixed-size requests across fixed-size pools.
@@ -552,14 +601,17 @@ similar to mimalloc's debug mode:
 - `src/allocators/sizeclass.c3` — the size-class dispatcher over pools.
 - `src/allocators/scratch.c3` — the single-frame scratch allocator.
 - `src/allocators/typed.c3` — the generic typed pool facade.
+- `src/allocators/tracking.c3` — the tracking debug wrapper and `trk_*`
+  macros.
 - `src/main.c3` — executable entry point.
 - `bench/allocators_bench.c3` — allocator benchmarks run by `make bench`.
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
   `test/freelist_test.c3`, `test/buddy_test.c3`,
   `test/bitmap_buddy_test.c3`,
   `test/sizeclass_test.c3`,
-  `test/scratch_test.c3`, `test/debug_test.c3`, and
-  `test/common_test.c3` — allocator behavior and failure-path tests.
+  `test/scratch_test.c3`, `test/debug_test.c3`, `test/tracking_test.c3`,
+  and `test/common_test.c3` — allocator behavior
+  and failure-path tests.
 - `project.json` — C3 compiler project configuration.
 - `Makefile` — build, test, formatting, and clean targets.
 - `.c3fmt` — formatter configuration for `c3fmt`.

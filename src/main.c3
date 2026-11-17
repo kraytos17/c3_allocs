@@ -92,5 +92,22 @@ fn int main(String[] args)
 	io::printf("bitmap buddy: managed=%d 16-byte alloc costs=%d bytes\n", bitmap_buddy.capacity(), used_before);
 	alloc::free(&bitmap_buddy, tiny);
 	io::printf("bitmap buddy after free: used=%d\n", bitmap_buddy.bytes_used());
+
+	char[2048] track_storage;
+	allocators::FreeListAllocator track_list;
+	track_list.init(track_storage[..]);
+	allocators::TrackingAllocator tracker;
+	tracker.init(&track_list);
+	void*? tracked_opt = allocators::trk_malloc(&tracker, 64);
+	if (catch tracked_opt) return 1;
+	void* tracked = tracked_opt;
+	io::printf(
+		"tracking: live=%d bytes=%d leaks=%d\n",
+		tracker.live_count(),
+		tracker.live_bytes(),
+		tracker.report_leaks()
+	);
+	allocators::trk_free(&tracker, tracked);
+	tracker.free();
 	return 0;
 }
