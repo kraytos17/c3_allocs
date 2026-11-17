@@ -504,3 +504,98 @@ fn void backed_arena_overflow_honors_zero_init() @test
 	char* clean = arena.acquire(64, alloc::AllocInitType.ZERO)!!;
 	for (sz i = 0; i < 64; i++) assert(clean[i] == 0);
 }
+
+fn void backed_arena_reset_retaining_parks_and_reuses_pages() @test
+{
+	char[8] initial_storage;
+	char[1024] backing_storage;
+	allocators::ArenaAllocator backing_arena;
+	backing_arena.init(backing_storage[..]);
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], &backing_arena);
+
+	sz mark = arena.mark();
+	(void)arena.acquire(256, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.overflow_count() == 1);
+	sz backing_used_live = backing_arena.bytes_reserved();
+
+	arena.reset_retaining(mark);
+	assert(arena.overflow_count() == 0);
+	assert(arena.page_pool_count() == 1);
+	assert(backing_arena.bytes_reserved() == backing_used_live);
+
+	void* reused = arena.acquire(256, alloc::AllocInitType.NO_ZERO)!!;
+	assert(reused != null);
+	assert(arena.overflow_count() == 1);
+	assert(arena.page_pool_count() == 0);
+	assert(backing_arena.bytes_reserved() == backing_used_live);
+	arena.prune_pool();
+	assert(arena.page_pool_count() == 0);
+}
+
+fn void backed_arena_reset_retaining_reuses_only_fitting_pages() @test
+{
+	char[8] initial_storage;
+	char[2048] backing_storage;
+	allocators::ArenaAllocator backing_arena;
+	backing_arena.init(backing_storage[..]);
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], &backing_arena);
+
+	sz mark = arena.mark();
+	(void)arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
+	arena.reset_retaining(mark);
+	assert(arena.page_pool_count() == 1);
+	sz backing_used = backing_arena.bytes_reserved();
+
+	// A larger request cannot reuse the small pooled page.
+	(void)arena.acquire(512, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.page_pool_count() == 1);
+	assert(backing_arena.bytes_reserved() > backing_used);
+
+	// A stricter alignment cannot reuse the default-aligned pooled pages.
+	arena.reset_retaining(mark);
+	assert(arena.page_pool_count() == 2);
+	(void)arena.acquire(48, alloc::AllocInitType.NO_ZERO, 64)!!;
+	assert(arena.page_pool_count() == 2);
+	assert(arena.overflow_count() == 1);
+}
+
+fn void backed_arena_free_drains_page_pool() @test
+{
+	char[8] initial_storage;
+	char[512] backing_storage;
+	allocators::ArenaAllocator backing_arena;
+	backing_arena.init(backing_storage[..]);
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], &backing_arena);
+
+	sz mark = arena.mark();
+	(void)arena.acquire(128, alloc::AllocInitType.NO_ZERO)!!;
+	arena.reset_retaining(mark);
+	assert(arena.page_pool_count() == 1);
+	arena.free();
+	assert(arena.page_pool_count() == 0);
+	assert(arena.overflow_count() == 0);
+	assert(backing_arena.bytes_reserved() == 0);
+}
+
+fn void backed_arena_owns_covers_both_paths() @test
+{
+	char[64] initial_storage;
+	char[512] backing_storage;
+	allocators::ArenaAllocator backing_arena;
+	backing_arena.init(backing_storage[..]);
+	allocators::BackedArenaAllocator arena;
+	arena.init(initial_storage[..], &backing_arena);
+
+	void* initial = arena.acquire(8, alloc::AllocInitType.NO_ZERO)!!;
+	void* overflow = arena.acquire(256, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.owns(initial));
+	assert(arena.owns(overflow));
+	assert(!arena.owns((char*)initial + 4));
+	assert(!arena.owns((void*)0x1));
+	arena.release(overflow, false);
+	assert(!arena.owns(overflow));
+	assert(arena.owns(initial));
+}

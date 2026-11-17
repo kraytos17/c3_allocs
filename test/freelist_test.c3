@@ -360,3 +360,18 @@ fn void freelist_policy_stays_correct_after_switch() @test
 	list.release(after, false);
 	assert(list.bytes_free() == initial_free);
 }
+
+fn void freelist_owns_rejects_interior_and_foreign() @test
+{
+	char[256] storage;
+	allocators::FreeListAllocator list;
+	list.init(storage[..]);
+
+	void* item = list.acquire(24, alloc::AllocInitType.NO_ZERO)!!;
+	assert(list.owns(item));
+	assert(!list.owns((char*)item + 4));
+	assert(!list.owns((void*)0x1));
+	assert(!list.owns(null));
+	list.release(item, false);
+	assert(!list.owns(item));
+}

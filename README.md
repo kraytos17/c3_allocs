@@ -286,6 +286,11 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
 - `initial_served()` and `overflow_served()` count lifetime allocations per
   path. A high overflow share means the initial buffer is undersized for
   the workload.
+- `reset_retaining(mark)` parks overflow pages in an internal pool instead
+  of freeing them, so steady-state frame loops stop calling the backing
+  allocator. `page_pool_count()` reports parked pages and `prune_pool()`
+  returns them to the backing allocator. `reset` and `clear` always free;
+  `free` also drains the pool.
 - `resize` preserves the common prefix. It may resize the newest initial-buffer
   allocation in place; otherwise it acquires a replacement before releasing
   the old allocation. On failure, it leaves the original allocation valid.
@@ -448,6 +453,21 @@ if (catch point_opt) return;
 PoolTestPoint* point = point_opt;
 pool.release(point);
 ```
+
+## Ownership and LIFO queries
+
+Every allocator exposes `owns(pointer)` to test whether a pointer belongs
+to it. Semantics differ where the data structure dictates:
+
+- `PoolAllocator`, `SizeClassAllocator`, `FreeListAllocator`,
+  `BuddyAllocator`, and `BackedArenaAllocator` validate allocation
+  metadata: only exact payload pointers report true; interior and foreign
+  pointers report false.
+- `ArenaAllocator` and `ScratchAllocator` do a range check like the
+  standard library's fixed-buffer allocator: interior pointers count.
+- `ArenaAllocator` and `ScratchAllocator` also expose `is_last(pointer)`
+  for the newest-allocation check that governs their LIFO release
+  behavior. The pointer must be a payload the allocator returned.
 
 ## Repository layout
 

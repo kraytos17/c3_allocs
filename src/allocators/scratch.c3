@@ -81,6 +81,26 @@ fn void scratch_note_peak(ScratchAllocator* self) @local
 }
 
 <*
+ Check whether a pointer lies inside the scratch allocator's live storage.
+
+ Range semantics match `ArenaAllocator.owns`; interior pointers count.
+
+ @param [&in] self : "The allocator to validate against"
+ @param pointer : "A candidate pointer"
+ @return "True when the pointer lies within live scratch storage"
+*>
+fn bool ScratchAllocator.owns(&self, void* pointer) => self.arena.owns(pointer);
+
+<*
+ Check whether a payload pointer is the most recent scratch allocation.
+
+ @param [&in] self : "The allocator to validate against"
+ @param pointer : "A candidate payload pointer"
+ @return "True when the payload is the newest allocation"
+*>
+fn bool ScratchAllocator.is_last(&self, void* pointer) => self.arena.is_last(pointer);
+
+<*
  Discard all scratch allocations at once.
 
  The high-water mark is retained so frame sizing survives across frames.

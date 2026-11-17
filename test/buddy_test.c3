@@ -181,3 +181,17 @@ fn void buddy_works_with_standard_helpers() @test
 	for (sz i = 0; i < 48; i++) assert(grown[i] == (char)i);
 	alloc::free(&buddy, grown);
 }
+
+fn void buddy_owns_rejects_interior_and_foreign() @test
+{
+	char[512] storage;
+	allocators::BuddyAllocator buddy;
+	buddy.init(storage[..]);
+
+	void* item = buddy.acquire(24, alloc::AllocInitType.NO_ZERO)!!;
+	assert(buddy.owns(item));
+	assert(!buddy.owns((char*)item + 4));
+	assert(!buddy.owns((void*)0x1));
+	buddy.release(item, false);
+	assert(!buddy.owns(item));
+}

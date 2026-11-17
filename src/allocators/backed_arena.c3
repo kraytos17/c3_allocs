@@ -19,10 +19,12 @@ struct BackedArenaAllocator (Allocator) @mustinit
 	Allocator backing_allocator;
 	BackedArenaHeader* last_initial_header;
 	BackedArenaPage* pages;
+	BackedArenaPage* page_pool;
 	sz initial_used;
 	sz next_sequence;
 	sz initial_total;
 	sz overflow_total;
+	sz pooled_count;
 }
 
 struct BackedArenaHeader @local
@@ -45,6 +47,7 @@ struct BackedArenaPage @local
 	sz requested_size;
 	sz sequence;
 	sz allocation_alignment;
+	sz block_size;
 }
 
 <*
@@ -65,10 +68,12 @@ fn BackedArenaAllocator* BackedArenaAllocator.init(&self, char[] initial_data, A
 	self.backing_allocator = backing_allocator;
 	self.last_initial_header = null;
 	self.pages = null;
+	self.page_pool = null;
 	self.initial_used = 0;
 	self.next_sequence = 1;
 	self.initial_total = 0;
 	self.overflow_total = 0;
+	self.pooled_count = 0;
 	return self;
 }
 
@@ -166,6 +171,52 @@ fn sz BackedArenaAllocator.initial_served(&self) => self.initial_total;
 fn sz BackedArenaAllocator.overflow_served(&self) => self.overflow_total;
 
 <*
+ Return the number of overflow pages parked in the reuse pool.
+
+ Pages enter the pool through `reset_retaining` and leave it when a new
+ overflow request reuses one, or when `prune_pool` or `free` drains it.
+ Pooled pages still count against the backing allocator's live memory.
+
+ @param [&in] self : "The arena to query"
+ @return "The pooled page count"
+*>
+fn sz BackedArenaAllocator.page_pool_count(&self) => self.pooled_count;
+
+<*
+ Return every pooled overflow page to the backing allocator.
+
+ @param [&inout] self : "The arena whose pool is drained"
+*>
+fn void BackedArenaAllocator.prune_pool(&self)
+{
+	while (self.page_pool)
+	{
+		BackedArenaPage* page = self.page_pool;
+		self.page_pool = page.next;
+		self.pooled_count--;
+		backed_arena_free_page(self.backing_allocator, page);
+	}
+}
+
+<*
+ Check whether a pointer is a live allocation of this arena.
+
+ The check validates the initial-buffer header or overflow page payload, so
+ only exact payload pointers report true; interior and foreign pointers
+ report false.
+
+ @param [&in] self : "The arena to validate against"
+ @param pointer : "A candidate payload pointer"
+ @return "True when the pointer is a live payload of this arena"
+*>
+fn bool BackedArenaAllocator.owns(&self, void* pointer)
+{
+	if (!pointer) return false;
+	if (backed_arena_initial_header(self, pointer)) return true;
+	return backed_arena_find_page_link(self, pointer) != null;
+}
+
+<*
  Reset to a mark, invalidating allocations made after it.
 
  Overflow blocks created after the mark are returned to the backing allocator.
@@ -182,15 +233,7 @@ fn sz BackedArenaAllocator.overflow_served(&self) => self.overflow_total;
 fn void BackedArenaAllocator.reset(&self, sz mark)
 {
 	assert(mark < self.next_sequence, "Backed arena mark is from a future or discarded history.");
-	while (self.last_initial_header && self.last_initial_header.sequence > mark)
-	{
-		BackedArenaHeader* header = self.last_initial_header;
-		self.last_initial_header = header.previous;
-		self.initial_used = header.previous_used;
-		header.magic = 0;
-	}
-
-	backed_arena_rewind_freed_initial(self);
+	backed_arena_rewind_to(self, mark);
 	BackedArenaPage** current = &self.pages;
 	while (*current)
 	{
@@ -199,6 +242,42 @@ fn void BackedArenaAllocator.reset(&self, sz mark)
 		{
 			*current = page.next;
 			backed_arena_free_page(self.backing_allocator, page);
+		}
+		else
+		{
+			current = &page.next;
+		}
+	}
+	self.next_sequence = mark + 1;
+}
+
+<*
+ Reset to a mark, parking overflow pages for reuse instead of freeing them.
+
+ Same semantics as `reset`, except overflow pages created after the mark are
+ moved to an internal pool. Later overflow requests reuse a pooled page when
+ its backing block is large enough and its alignment is sufficient, so
+ steady-state frame loops stop hitting the backing allocator. Pooled pages
+ still hold backing memory until reused or drained with `prune_pool`.
+
+ @param [&inout] self : "The arena to reset"
+ @param mark : "A mark previously returned by this arena"
+ @require mark < self.next_sequence : "The mark must not be ahead of the current arena position"
+*>
+fn void BackedArenaAllocator.reset_retaining(&self, sz mark)
+{
+	assert(mark < self.next_sequence, "Backed arena mark is from a future or discarded history.");
+	backed_arena_rewind_to(self, mark);
+	BackedArenaPage** current = &self.pages;
+	while (*current)
+	{
+		BackedArenaPage* page = *current;
+		if (page.sequence > mark)
+		{
+			*current = page.next;
+			page.next = self.page_pool;
+			self.page_pool = page;
+			self.pooled_count++;
 		}
 		else
 		{
@@ -223,15 +302,37 @@ fn void BackedArenaAllocator.clear(&self) => self.reset(0);
  Free all overflow blocks owned by the arena and detach its borrowed buffer.
 
  The arena must not be used after this call until reinitialized. The borrowed
- initial buffer itself is never freed.
+ initial buffer itself is never freed. Pooled pages are returned to the
+ backing allocator.
 
  @param [&inout] self : "The arena to free"
 *>
 fn void BackedArenaAllocator.free(&self)
 {
+	self.prune_pool();
 	self.clear();
 	self.initial_data = { };
 	self.backing_allocator = { };
+}
+
+<*
+ Rewind initial-buffer headers and released tails down to a mark.
+
+ Shared by `reset` and `reset_retaining`; page disposition happens after.
+
+ @param [&inout] self : "The arena being rewound"
+ @param mark : "The validated target mark"
+*>
+fn void backed_arena_rewind_to(BackedArenaAllocator* self, sz mark) @local
+{
+	while (self.last_initial_header && self.last_initial_header.sequence > mark)
+	{
+		BackedArenaHeader* header = self.last_initial_header;
+		self.last_initial_header = header.previous;
+		self.initial_used = header.previous_used;
+		header.magic = 0;
+	}
+	backed_arena_rewind_freed_initial(self);
 }
 
 <*
@@ -325,10 +426,14 @@ fn void*? backed_arena_acquire_initial(
 }
 
 <*
- Allocate a dedicated overflow block through the backing allocator.
+ Allocate a dedicated overflow block through the backing allocator, or reuse
+ a pooled page.
 
- The descriptor and payload share one backing allocation. The descriptor is
- initialized and linked into the arena only after allocation succeeds.
+ A pooled page is reused when its backing block is large enough for the new
+ payload and its allocation alignment is at least as strict as the request;
+ otherwise the next pooled page is considered. The descriptor and payload
+ share one backing allocation. The descriptor is initialized and linked into
+ the arena only after the block is secured.
 
  @param [&inout] self : "The arena that owns the new overflow page"
  @param size : "The requested payload size"
@@ -346,6 +451,30 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	if (size > sz::max - payload_offset) return mem::INVALID_ALLOC_SIZE~;
 
 	sz total_size = payload_offset + size;
+	BackedArenaPage** pool_link = &self.page_pool;
+	while (*pool_link)
+	{
+		BackedArenaPage* pooled = *pool_link;
+		if (pooled.block_size >= total_size && pooled.allocation_alignment >= alignment)
+		{
+			*pool_link = pooled.next;
+			self.pooled_count--;
+			void* block = pooled.descriptor_block;
+			void* payload = (char*)block + payload_offset;
+			sz sequence = self.next_sequence;
+			self.next_sequence++;
+			pooled.next = self.pages;
+			pooled.payload = payload;
+			pooled.requested_size = size;
+			pooled.sequence = sequence;
+			self.pages = pooled;
+			self.overflow_total++;
+			allocator_zero_if(payload, size, init_type);
+			return payload;
+		}
+		pool_link = &(*pool_link).next;
+	}
+
 	void*? block_opt = self.backing_allocator.acquire(total_size, NO_ZERO, alignment);
 	if (catch block_opt) return mem::OUT_OF_MEMORY~;
 
@@ -360,6 +489,7 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	page.requested_size = size;
 	page.sequence = sequence;
 	page.allocation_alignment = alignment;
+	page.block_size = total_size;
 	self.pages = page;
 	self.overflow_total++;
 	allocator_zero_if(payload, size, init_type);

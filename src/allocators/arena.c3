@@ -60,6 +60,51 @@ fn sz ArenaAllocator.capacity(&self) => self.data.len;
 fn sz ArenaAllocator.bytes_reserved(&self) => self.used;
 
 <*
+ Check whether a pointer lies inside the arena's live storage.
+
+ Like the standard library's fixed-buffer allocator, this is a range check:
+ any pointer between the first possible payload and the current arena
+ position reports true, including interior pointers. It cannot detect
+ whether the pointer is an exact payload.
+
+ @param [&in] self : "The arena to validate against"
+ @param pointer : "A candidate pointer"
+ @return "True when the pointer lies within live arena storage"
+*>
+fn bool ArenaAllocator.owns(&self, void* pointer)
+{
+	if (!pointer || self.used < ArenaHeader::size) return false;
+
+	uptr base_addr = (uptr)self.data.ptr;
+	uptr pointer_addr = (uptr)pointer;
+	if (pointer_addr < base_addr + (uptr)ArenaHeader::size) return false;
+	return pointer_addr < base_addr + (uptr)self.used;
+}
+
+<*
+ Check whether a payload pointer is the arena's most recent allocation.
+
+ The pointer must be a payload returned by this arena; behavior is
+ unspecified for other pointers.
+
+ @param [&in] self : "The arena to validate against"
+ @param pointer : "A candidate payload pointer"
+ @return "True when the payload is the newest allocation"
+*>
+fn bool ArenaAllocator.is_last(&self, void* pointer)
+{
+	if (!pointer || self.used < ArenaHeader::size) return false;
+
+	uptr base_addr = (uptr)self.data.ptr;
+	uptr pointer_addr = (uptr)pointer;
+	if (pointer_addr < base_addr + (uptr)ArenaHeader::size) return false;
+	if (pointer_addr >= base_addr + (uptr)self.used) return false;
+
+	ArenaHeader* header = pointer - ArenaHeader::size;
+	return pointer_addr + (uptr)header.size == base_addr + (uptr)self.used;
+}
+
+<*
  Discard all allocations made from this arena.
 
  All previously returned pointers become invalid. This does not clear the

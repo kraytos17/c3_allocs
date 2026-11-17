@@ -376,3 +376,24 @@ fn void arena_grouped_allocations_reduce_waste() @test
 	for (sz i = 0; i < 4; i++) (void)arena.acquire(8, alloc::AllocInitType.NO_ZERO, 8)!!;
 	assert(arena.bytes_reserved() <= interleaved_used);
 }
+
+fn void arena_owns_and_is_last_queries() @test
+{
+	char[256] storage;
+	allocators::ArenaAllocator arena;
+	arena.init(storage[..]);
+
+	assert(!arena.owns((void*)0x1));
+	void* first = arena.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	void* second = arena.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	assert(arena.owns(first));
+	assert(arena.owns(second));
+	assert(arena.owns((char*)first + 8));
+	assert(!arena.owns(&storage[255]));
+	assert(arena.is_last(second));
+	assert(!arena.is_last(first));
+	arena.release(second, false);
+	assert(arena.is_last(first));
+	arena.clear();
+	assert(!arena.owns(first));
+}

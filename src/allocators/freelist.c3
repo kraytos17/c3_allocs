@@ -181,6 +181,18 @@ fn sz FreeListAllocator.largest_free(&self)
 }
 
 <*
+ Check whether a pointer is a live allocation of this allocator.
+
+ The check validates the allocation header, so only exact payload pointers
+ report true; interior and foreign pointers report false.
+
+ @param [&in] self : "The allocator to validate against"
+ @param pointer : "A candidate payload pointer"
+ @return "True when the pointer is a live payload of this allocator"
+*>
+fn bool FreeListAllocator.owns(&self, void* pointer) => freelist_used_header((FreeListAllocator*)self, pointer) != null;
+
+<*
  Discard all allocations and restore one contiguous free range.
 
  The borrowed buffer is retained. Pointers returned before the call must

@@ -77,3 +77,23 @@ fn void scratch_works_with_standard_helpers() @test
 	alloc::free(&scratch, grown);
 	assert(scratch.bytes_reserved() == 0);
 }
+
+fn void scratch_owns_and_is_last_queries() @test
+{
+	char[256] storage;
+	allocators::ScratchAllocator scratch;
+	scratch.init(storage[..]);
+
+	void* first = scratch.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	void* second = scratch.acquire(16, alloc::AllocInitType.NO_ZERO)!!;
+	assert(scratch.owns(first));
+	assert(scratch.owns(second));
+	assert(scratch.owns((char*)first + 8));
+	assert(!scratch.owns(&storage[255]));
+	assert(scratch.is_last(second));
+	assert(!scratch.is_last(first));
+	scratch.release(second, false);
+	assert(scratch.is_last(first));
+	scratch.clear();
+	assert(!scratch.owns(first));
+}
