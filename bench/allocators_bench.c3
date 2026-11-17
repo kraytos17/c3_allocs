@@ -39,6 +39,19 @@ fn void bench_freelist_acquire_release() @benchmark
 	}
 }
 
+fn void bench_freelist_bestfit_acquire_release() @benchmark
+{
+	allocators::FreeListAllocator list;
+	list.init(freelist_storage[..]);
+	list.set_policy(allocators::FreeListPolicy.BEST_FIT);
+	for (sz i = 0; i < BENCH_OPS; i++)
+	{
+		void*? ptr_opt = list.acquire(64, alloc::AllocInitType.NO_ZERO);
+		if (catch ptr_opt) return;
+		list.release(ptr_opt, false);
+	}
+}
+
 fn void bench_buddy_acquire_release() @benchmark
 {
 	allocators::BuddyAllocator buddy;

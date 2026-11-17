@@ -71,8 +71,10 @@ changes before committing them. Formatting rules are in the root `.c3fmt` file.
 Each benchmark performs a fixed batch of operations per iteration, so the
 reported average is per batch, not per allocation:
 
-- `bench_*_acquire_release` — hot-path acquire/release pairs for the arena,
-  backed arena, free-list, buddy, pool, and size-class dispatch.
+- `bench_freelist_*_acquire_release` — hot-path acquire/release pairs for
+  the arena, backed arena, free-list, buddy, pool, and size-class dispatch.
+  The free-list pair covers both policies: `FIRST_FIT` (default) and
+  `BEST_FIT`, which scans every range before choosing.
 - `bench_*_clear_cycle` — fill then bulk reset for arena, buddy, free-list,
   and scratch, measuring the O(1) bulk-reclaim cost.
 - `bench_freelist_fragmented_release` — release alternating blocks to
@@ -87,17 +89,18 @@ One reference run on my machine (64-byte requests, batches of
 
 | Benchmark                        | Avg per batch |
 | -------------------------------- | ------------- |
-| arena acquire/release            | 1.62 us       |
-| backed arena acquire/release     | 2.26 us       |
-| free-list acquire/release        | 3.70 us       |
-| buddy acquire/release            | 11.21 us      |
-| pool acquire/release             | 2.73 us       |
-| size-class acquire/release       | 7.22 us       |
-| arena clear cycle                | 1.13 us       |
-| scratch clear cycle              | 1.57 us       |
-| free-list clear cycle            | 2.02 us       |
-| buddy clear cycle                | 2.99 us       |
-| free-list fragmented release     | 6.98 us       |
+| arena acquire/release            | 1.52 us       |
+| backed arena acquire/release     | 2.19 us       |
+| pool acquire/release             | 2.90 us       |
+| free-list first-fit acquire/release | 3.43 us    |
+| free-list best-fit acquire/release  | 3.53 us    |
+| size-class acquire/release       | 7.67 us       |
+| buddy acquire/release            | 10.35 us      |
+| arena clear cycle                | 0.99 us       |
+| scratch clear cycle              | 1.42 us       |
+| free-list clear cycle            | 1.82 us       |
+| buddy clear cycle                | 2.75 us       |
+| free-list fragmented release     | 7.01 us       |
 
 ## Choosing an allocator
 
