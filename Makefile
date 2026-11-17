@@ -6,6 +6,7 @@ SOURCES := src test
 BENCH_SOURCES := src/allocators/common.c3 src/allocators/arena.c3 \
 	src/allocators/pool.c3 src/allocators/backed_arena.c3 \
 	src/allocators/freelist.c3 src/allocators/buddy.c3 \
+	src/allocators/bitmap_buddy.c3 \
 	src/allocators/sizeclass.c3 src/allocators/scratch.c3 \
 	src/allocators/typed.c3 bench/allocators_bench.c3
 

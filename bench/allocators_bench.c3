@@ -10,6 +10,7 @@ char[BENCH_BUFFER] arena_storage;
 char[BENCH_BUFFER] pool_storage;
 char[BENCH_BUFFER] freelist_storage;
 char[BENCH_BUFFER] buddy_storage;
+char[BENCH_BUFFER] bitmap_buddy_storage;
 char[BENCH_BUFFER] class_storage;
 char[BENCH_BUFFER] scratch_storage;
 char[BENCH_BUFFER] backed_initial;
@@ -59,6 +60,30 @@ fn void bench_buddy_acquire_release() @benchmark
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = buddy.acquire(64, alloc::AllocInitType.NO_ZERO);
+		if (catch ptr_opt) return;
+		buddy.release(ptr_opt, false);
+	}
+}
+
+fn void bench_bitmap_buddy_acquire_release() @benchmark
+{
+	allocators::BitmapBuddyAllocator buddy;
+	buddy.init(bitmap_buddy_storage[..]);
+	for (sz i = 0; i < BENCH_OPS; i++)
+	{
+		void*? ptr_opt = buddy.acquire(64, alloc::AllocInitType.NO_ZERO);
+		if (catch ptr_opt) return;
+		buddy.release(ptr_opt, false);
+	}
+}
+
+fn void bench_bitmap_buddy_sixteen_acquire_release() @benchmark
+{
+	allocators::BitmapBuddyAllocator buddy;
+	buddy.init(bitmap_buddy_storage[..]);
+	for (sz i = 0; i < BENCH_OPS; i++)
+	{
+		void*? ptr_opt = buddy.acquire(16, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		buddy.release(ptr_opt, false);
 	}

@@ -77,9 +77,10 @@ Each benchmark performs a fixed batch of operations per iteration, so the
 reported average is per batch, not per allocation:
 
 - `bench_freelist_*_acquire_release` — hot-path acquire/release pairs for
-  the arena, backed arena, free-list, buddy, pool, and size-class dispatch.
-  The free-list pair covers both policies: `FIRST_FIT` (default) and
-  `BEST_FIT`, which scans every range before choosing.
+  the arena, backed arena, free-list, buddy, bitmap buddy, pool, and
+  size-class dispatch. The free-list pair covers both policies: `FIRST_FIT`
+  (default) and `BEST_FIT`, which scans every range before choosing. The
+  bitmap buddy pair contrasts 64-byte and 16-byte requests.
 - `bench_*_clear_cycle` — fill then bulk reset for arena, buddy, free-list,
   and scratch, measuring the O(1) bulk-reclaim cost.
 - `bench_freelist_fragmented_release` — release alternating blocks to
@@ -89,23 +90,29 @@ Numbers vary by machine; compare within one run rather than across runs.
 Per-allocation overhead is observable through the byte stats instead
 (`bytes_reserved` vs payload, `bytes_used` vs `bytes_free`).
 
-One reference run on my machine (64-byte requests, batches of
+One reference run on my machine (64-byte requests unless noted, batches of
 64 operations, 65536-byte buffers; averages, lower is better):
 
-| Benchmark                        | Avg per batch |
-| -------------------------------- | ------------- |
-| arena acquire/release            | 1.52 us       |
-| backed arena acquire/release     | 2.19 us       |
-| pool acquire/release             | 2.90 us       |
-| free-list first-fit acquire/release | 3.43 us    |
-| free-list best-fit acquire/release  | 3.53 us    |
-| size-class acquire/release       | 7.67 us       |
-| buddy acquire/release            | 10.35 us      |
-| arena clear cycle                | 0.99 us       |
-| scratch clear cycle              | 1.42 us       |
-| free-list clear cycle            | 1.82 us       |
-| buddy clear cycle                | 2.75 us       |
-| free-list fragmented release     | 7.01 us       |
+| Benchmark                            | Avg per batch |
+| ------------------------------------ | ------------- |
+| arena acquire/release                | 1.46 us       |
+| backed arena acquire/release         | 2.03 us       |
+| pool acquire/release                 | 3.07 us       |
+| free-list first-fit acquire/release  | 3.30 us       |
+| free-list best-fit acquire/release   | 3.44 us       |
+| size-class acquire/release           | 10.71 us      |
+| buddy acquire/release                | 12.35 us      |
+| bitmap buddy acquire/release         | 18.66 us      |
+| bitmap buddy 16-byte acquire/release | 21.68 us      |
+| arena clear cycle                    | 0.99 us       |
+| scratch clear cycle                  | 1.39 us       |
+| free-list clear cycle                | 1.83 us       |
+| buddy clear cycle                    | 3.72 us       |
+| free-list fragmented release         | 6.81 us       |
+
+The bitmap buddy is slower per operation than the headered one because
+release must walk the split bits to recover the order; its win is zero
+per-allocation metadata, which matters only for tiny requests.
 
 ## Choosing an allocator
 

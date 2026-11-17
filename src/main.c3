@@ -83,5 +83,14 @@ fn int main(String[] args)
 	void* buddy_item = alloc::malloc(&buddy, 48);
 	io::printf("buddy: capacity=%d free=%d\n", buddy.capacity(), buddy.bytes_free());
 	alloc::free(&buddy, buddy_item);
+
+	char[4096] bitmap_buddy_storage;
+	allocators::BitmapBuddyAllocator bitmap_buddy;
+	bitmap_buddy.init(bitmap_buddy_storage[..]);
+	void* tiny = alloc::malloc(&bitmap_buddy, 16);
+	sz used_before = bitmap_buddy.bytes_used();
+	io::printf("bitmap buddy: managed=%d 16-byte alloc costs=%d bytes\n", bitmap_buddy.capacity(), used_before);
+	alloc::free(&bitmap_buddy, tiny);
+	io::printf("bitmap buddy after free: used=%d\n", bitmap_buddy.bytes_used());
 	return 0;
 }
