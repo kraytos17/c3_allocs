@@ -101,6 +101,59 @@ fn bool allocator_checked_add(sz a, sz b, sz* out)
 	return true;
 }
 
+const ALLOCATOR_CANARY_BYTE = 0xC3;
+const ALLOCATOR_POISON_BYTE = 0xAA;
+
+<*
+ Fill a trailing canary region after a payload.
+
+ @param start : "The first canary byte"
+ @param bytes : "The canary region byte count"
+*>
+fn void allocator_fill_canary(void* start, sz bytes)
+{
+	if (bytes <= 0) return;
+
+	char* cursor = (char*)start;
+	for (sz i = 0; i < bytes; i++) cursor[i] = (char)ALLOCATOR_CANARY_BYTE;
+}
+
+<*
+ Check whether a trailing canary region is intact.
+
+ @param start : "The first canary byte"
+ @param bytes : "The canary region byte count"
+ @return "True when every canary byte is unchanged"
+*>
+fn bool allocator_canary_intact(void* start, sz bytes)
+{
+	if (bytes <= 0) return true;
+
+	char* cursor = (char*)start;
+	for (sz i = 0; i < bytes; i++)
+	{
+		if (cursor[i] != (char)ALLOCATOR_CANARY_BYTE) return false;
+	}
+	return true;
+}
+
+<*
+ Poison a released payload region under test builds.
+
+ Test builds fill released memory so use-after-release reads are visible,
+ matching the standard library's 0xAA test fills. Release builds skip this.
+
+ @param start : "The first poisoned byte"
+ @param bytes : "The region byte count"
+*>
+fn void allocator_poison_if_testing(void* start, sz bytes)
+{
+	$if env::TESTING:
+		char* cursor = (char*)start;
+		for (sz i = 0; i < bytes; i++) cursor[i] = (char)ALLOCATOR_POISON_BYTE;
+	$endif
+}
+
 <*
  Return the smallest power of two at or above `value`.
 

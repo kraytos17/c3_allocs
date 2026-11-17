@@ -450,7 +450,7 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	sz payload_offset = allocator_align_up_size(BackedArenaPage::size, alignment);
 	if (size > sz::max - payload_offset) return mem::INVALID_ALLOC_SIZE~;
 
-	sz total_size = payload_offset + size;
+	sz total_size = allocator_align_up_size(payload_offset + size, BackedArenaPage::alignment);
 	BackedArenaPage** pool_link = &self.page_pool;
 	while (*pool_link)
 	{
@@ -469,6 +469,11 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 			pooled.sequence = sequence;
 			self.pages = pooled;
 			self.overflow_total++;
+			allocator_fill_canary(
+				(char*)payload + size,
+				(sz)(((uptr)block + (uptr)pooled.block_size) - ((uptr)payload + (uptr)size))
+			);
+
 			allocator_zero_if(payload, size, init_type);
 			return payload;
 		}
@@ -492,8 +497,29 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	page.block_size = total_size;
 	self.pages = page;
 	self.overflow_total++;
+	allocator_fill_canary(
+		(char*)payload + size,
+		(sz)(((uptr)block + (uptr)page.block_size) - ((uptr)payload + (uptr)size))
+	);
+
 	allocator_zero_if(payload, size, init_type);
 	return payload;
+}
+
+<*
+ Compute the canary byte count for an overflow page payload.
+
+ @param page : "The page owning the payload"
+ @param payload : "The page payload pointer"
+ @return "The canary region byte count"
+*>
+fn sz backed_arena_page_canary_len(BackedArenaPage* page, void* payload) @local
+{
+	uptr block_end = (uptr)page.descriptor_block + (uptr)page.block_size;
+	uptr canary_end = block_end;
+	uptr canary_start = (uptr)payload + (uptr)page.requested_size;
+	if (canary_start >= canary_end) return 0;
+	return (sz)(canary_end - canary_start);
 }
 
 <*
@@ -551,7 +577,13 @@ fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	BackedArenaPage* old_page = *page_link;
 	if (new_size <= old_page.requested_size && mem::ptr_is_aligned(old_pointer, effective_alignment))
 	{
+		assert(allocator_canary_intact(
+			(char*)old_pointer + old_page.requested_size,
+			backed_arena_page_canary_len(old_page, old_pointer)
+		), "Backed arena trailing canary was corrupted before resize.");
+
 		old_page.requested_size = new_size;
+		allocator_fill_canary((char*)old_pointer + new_size, backed_arena_page_canary_len(old_page, old_pointer));
 		return old_pointer;
 	}
 
@@ -597,8 +629,33 @@ fn void BackedArenaAllocator.release(&self, void* old_pointer, bool aligned) @dy
 	if (!page_link) return;
 
 	BackedArenaPage* page = *page_link;
+	assert(allocator_canary_intact(
+		(char*)old_pointer + page.requested_size,
+		backed_arena_page_canary_len(page, old_pointer)
+	), "Backed arena trailing canary was corrupted before release.");
+
+	allocator_poison_if_testing(old_pointer, page.requested_size);
 	*page_link = page.next;
 	backed_arena_free_page(self.backing_allocator, page);
+}
+
+<*
+ Check whether an overflow payload's trailing canary is intact.
+
+ Initial-buffer payloads have no trailing slack and always report true.
+
+ @param [&in] self : "The arena that owns the block"
+ @param pointer : "A live payload pointer"
+ @return "True when no bytes were written past the requested size"
+*>
+fn bool BackedArenaAllocator.canary_intact(&self, void* pointer)
+{
+	BackedArenaPage** page_link = backed_arena_find_page_link(self, pointer);
+	if (!page_link) return true;
+	return allocator_canary_intact(
+		(char*)pointer + (*page_link).requested_size,
+		backed_arena_page_canary_len(*page_link, pointer)
+	);
 }
 
 <*

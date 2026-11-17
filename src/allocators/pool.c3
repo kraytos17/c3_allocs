@@ -168,6 +168,7 @@ fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alig
 	slot.requested_size = size;
 	slot.in_use = true;
 	void* result = (char*)slot + self.payload_offset;
+	allocator_fill_canary((char*)result + size, self.block_size - size);
 	allocator_zero_if(result, size, init_type);
 	return result;
 }
@@ -196,7 +197,13 @@ fn void*? PoolAllocator.resize(&self, void* old_pointer, sz new_size, sz alignme
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
 	if (!slot || !slot.in_use) return mem::INVALID_ALLOC_SIZE~;
 
+	assert(allocator_canary_intact(
+		(char*)old_pointer + slot.requested_size,
+		self.block_size - slot.requested_size
+	), "Pool trailing canary was corrupted before resize.");
+
 	slot.requested_size = new_size;
+	allocator_fill_canary((char*)old_pointer + new_size, self.block_size - new_size);
 	return old_pointer;
 }
 
@@ -240,9 +247,29 @@ fn void PoolAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
 	if (!slot || !slot.in_use || self.free_count >= self.slot_count) return;
 
+	assert(allocator_canary_intact(
+		(char*)old_pointer + slot.requested_size,
+		self.block_size - slot.requested_size
+	), "Pool trailing canary was corrupted before release.");
+
+	allocator_poison_if_testing(old_pointer, slot.requested_size);
 	slot.in_use = false;
 	slot.requested_size = 0;
 	slot.next = self.free_head;
 	self.free_head = slot;
 	self.free_count++;
+}
+
+<*
+ Check whether a slot payload's trailing canary is intact.
+
+ @param [&in] self : "The pool that owns the slot"
+ @param pointer : "A live payload pointer"
+ @return "True when no bytes were written past the requested size"
+*>
+fn bool PoolAllocator.canary_intact(&self, void* pointer)
+{
+	PoolSlot* slot = pool_slot_for_pointer(self, pointer);
+	if (!slot || !slot.in_use) return false;
+	return allocator_canary_intact((char*)pointer + slot.requested_size, self.block_size - slot.requested_size);
 }

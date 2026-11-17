@@ -469,6 +469,29 @@ to it. Semantics differ where the data structure dictates:
   for the newest-allocation check that governs their LIFO release
   behavior. The pointer must be a payload the allocator returned.
 
+## Debug hardening
+
+The header-carrying allocators protect payloads with a trailing canary,
+similar to mimalloc's debug mode:
+
+- On `acquire`, every byte between the requested payload end and the end
+  of the block is filled with `0xC3`. When the block packs exactly, the
+  canary region is empty and the check is trivially true.
+- On `release` and on the in-place paths of `resize`, the canary is
+  verified; a mismatch aborts with a message naming the allocator. The
+  canary is refilled after in-place shrinks.
+- `PoolAllocator`, `FreeListAllocator`, `BuddyAllocator`, and overflow
+  pages of `BackedArenaAllocator` participate. Initial-buffer allocations
+  of `BackedArenaAllocator` have no trailing slack and are not covered.
+  Backed-arena overflow blocks round up to 16 bytes so a canary fits.
+- `canary_intact(pointer)` is a public query on the covered allocators for
+  checking a live payload at any time. The pointer must be a payload the
+  allocator returned.
+- On `release` under test builds (`env::TESTING`), the released payload
+  region is poisoned with `0xAA`, matching the standard library's test
+  fills, so use-after-release reads are visible. Release builds skip
+  poisoning.
+
 ## Repository layout
 
 - `src/allocators/common.c3` — shared alignment helpers.
@@ -485,8 +508,8 @@ to it. Semantics differ where the data structure dictates:
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
   `test/freelist_test.c3`, `test/buddy_test.c3`,
   `test/sizeclass_test.c3`,
-  `test/scratch_test.c3`, and `test/common_test.c3` — allocator behavior
-  and failure-path tests.
+  `test/scratch_test.c3`, `test/debug_test.c3`, and
+  `test/common_test.c3` — allocator behavior and failure-path tests.
 - `project.json` — C3 compiler project configuration.
 - `Makefile` — build, test, formatting, and clean targets.
 - `.c3fmt` — formatter configuration for `c3fmt`.

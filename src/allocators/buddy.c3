@@ -344,6 +344,7 @@ fn void*? BuddyAllocator.acquire(&self, sz size, AllocInitType init_type, sz ali
 	header.requested_size = size;
 	void* result = (void*)payload_addr;
 	self.free_bytes -= leaf_size;
+	allocator_fill_canary((char*)result + size, (sz)((block_start + (uptr)leaf_size) - (payload_addr + (uptr)size)));
 	allocator_zero_if(result, size, init_type);
 	return result;
 }
@@ -392,6 +393,12 @@ fn void BuddyAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 	uptr block_start = (uptr)header - (uptr)header.block_offset;
 	sz order = header.order;
 	sz block_size = ((sz)BUDDY_MIN_BLOCK << order);
+	assert(allocator_canary_intact(
+		(char*)old_pointer + header.requested_size,
+		(sz)((block_start + (uptr)block_size) - ((uptr)old_pointer + (uptr)header.requested_size))
+	), "Buddy trailing canary was corrupted before release.");
+
+	allocator_poison_if_testing(old_pointer, header.requested_size);
 	header.magic = 0;
 	self.free_bytes += block_size;
 
@@ -411,6 +418,26 @@ fn void BuddyAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 	BuddyFree* block = (BuddyFree*)merged_start;
 	block.next = self.free_heads[merged_order];
 	self.free_heads[merged_order] = block;
+}
+
+<*
+ Check whether a payload's trailing canary is intact.
+
+ @param [&in] self : "The allocator that owns the block"
+ @param pointer : "A live payload pointer"
+ @return "True when no bytes were written past the requested size"
+*>
+fn bool BuddyAllocator.canary_intact(&self, void* pointer)
+{
+	BuddyUsedHeader* header = buddy_used_header(self, pointer);
+	if (!header) return false;
+
+	uptr block_start = (uptr)header - (uptr)header.block_offset;
+	sz block_size = ((sz)BUDDY_MIN_BLOCK << header.order);
+	return allocator_canary_intact(
+		(char*)pointer + header.requested_size,
+		(sz)((block_start + (uptr)block_size) - ((uptr)pointer + (uptr)header.requested_size))
+	);
 }
 
 <*
@@ -446,7 +473,16 @@ fn void*? BuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz alignm
 	sz max_fit = block_size - (sz)(old_addr - block_start);
 	if (mem::ptr_is_aligned(old_pointer, effective) && new_size <= max_fit)
 	{
+		assert(allocator_canary_intact(
+			(char*)old_pointer + header.requested_size,
+			(sz)((block_start + (uptr)block_size) - ((uptr)old_pointer + (uptr)header.requested_size))
+		), "Buddy trailing canary was corrupted before resize.");
+
 		header.requested_size = new_size;
+		allocator_fill_canary(
+			(char*)old_pointer + new_size,
+			(sz)((block_start + (uptr)block_size) - ((uptr)old_pointer + (uptr)new_size))
+		);
 		return old_pointer;
 	}
 

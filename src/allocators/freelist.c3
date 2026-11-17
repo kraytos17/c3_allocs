@@ -416,6 +416,7 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 		self.free_bytes -= free_size;
 	}
 
+	allocator_fill_canary((char*)result + size, (sz)(start + (uptr)alloc_size) - ((sz)payload_addr + size));
 	allocator_zero_if(result, size, init_type);
 	return result;
 }
@@ -462,6 +463,11 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 	{
 		if (new_size <= max_fit)
 		{
+			assert(allocator_canary_intact(
+				(char*)old_pointer + old_requested,
+				(sz)(block_start + (uptr)block_size) - ((sz)old_addr + old_requested)
+			), "Free-list trailing canary was corrupted before resize.");
+
 			sz total_needed = (sz)payload_offset + new_size;
 			sz alloc_size = allocator_split_size(
 				total_needed,
@@ -482,6 +488,11 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 			{
 				header.requested_size = new_size;
 			}
+
+			allocator_fill_canary(
+				(char*)old_pointer + new_size,
+				(sz)(block_start + (uptr)header.block_size) - ((sz)old_addr + new_size)
+			);
 			return old_pointer;
 		}
 
@@ -497,6 +508,11 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 				if (combined >= block_size && payload_offset <= (uptr)combined
 					&& combined - (sz)payload_offset >= new_size)
 				{
+					assert(allocator_canary_intact(
+						(char*)old_pointer + old_requested,
+						(sz)(block_start + (uptr)block_size) - ((sz)old_addr + old_requested)
+					), "Free-list trailing canary was corrupted before resize.");
+
 					sz total_needed = (sz)payload_offset + new_size;
 					sz alloc_size = allocator_split_size(
 						total_needed,
@@ -522,6 +538,11 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 						header.block_size = combined;
 						header.requested_size = new_size;
 					}
+
+					allocator_fill_canary(
+						(char*)old_pointer + new_size,
+						(sz)(block_start + (uptr)header.block_size) - ((sz)old_addr + new_size)
+					);
 					return old_pointer;
 				}
 				break;
@@ -566,8 +587,33 @@ fn void FreeListAllocator.release(&self, void* old_pointer, bool aligned) @dynam
 	sz block_size = header.block_size;
 	if (block_size < FreeListFreeBlock::size) return;
 
+	assert(allocator_canary_intact(
+		(char*)old_pointer + header.requested_size,
+		(sz)((block_start + (uptr)block_size) - ((uptr)old_pointer + (uptr)header.requested_size))
+	), "Free-list trailing canary was corrupted before release.");
+
+	allocator_poison_if_testing(old_pointer, header.requested_size);
 	header.in_use = false;
 	header.magic = 0;
 	self.free_bytes += block_size;
 	freelist_insert_coalesce(self, (void*)block_start, block_size);
+}
+
+<*
+ Check whether a payload's trailing canary is intact.
+
+ @param [&in] self : "The allocator that owns the block"
+ @param pointer : "A live payload pointer"
+ @return "True when no bytes were written past the requested size"
+*>
+fn bool FreeListAllocator.canary_intact(&self, void* pointer)
+{
+	FreeListUsedHeader* header = freelist_used_header(self, pointer);
+	if (!header) return false;
+
+	uptr block_start = (uptr)header - (uptr)header.block_offset;
+	return allocator_canary_intact(
+		(char*)pointer + header.requested_size,
+		(sz)((block_start + (uptr)header.block_size) - ((uptr)pointer + (uptr)header.requested_size))
+	);
 }
