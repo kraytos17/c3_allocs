@@ -180,7 +180,8 @@ fn void*? PoolAllocator.acquire(&self, sz size, AllocInitType init_type, sz alig
  Pool blocks never move during resize. The new size must fit the configured
  block size, and the requested alignment must be supported. Existing contents
  are preserved up to the smaller of the old and new sizes. Failure leaves the
- allocation unchanged.
+ allocation unchanged. A corrupted trailing canary fails the resize with
+ `INVALID_ALLOC_SIZE` and preserves the block.
 
  @param [&inout] self : "The pool that acquired the block"
  @param [drop] old_pointer : "The allocation to resize"
@@ -198,10 +199,11 @@ fn void*? PoolAllocator.resize(&self, void* old_pointer, sz new_size, sz alignme
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
 	if (!slot || !slot.in_use) return mem::INVALID_ALLOC_SIZE~;
 
-	assert(allocator_canary_intact(
+	// A corrupted canary fails the resize and preserves the block.
+	if (!allocator_canary_intact(
 		(char*)old_pointer + slot.requested_size,
 		self.block_size - slot.requested_size
-	), "Pool trailing canary was corrupted before resize.");
+	)) return mem::INVALID_ALLOC_SIZE~;
 
 	slot.requested_size = new_size;
 	allocator_fill_canary((char*)old_pointer + new_size, self.block_size - new_size);
@@ -235,7 +237,8 @@ fn PoolSlot* pool_slot_for_pointer(PoolAllocator* self, void* pointer) @local
 <*
  Release a slot acquired from this pool so it can be reused.
 
- Null, foreign, interior, and already-released pointers are ignored. The
+ Null, foreign, interior, and already-released pointers are ignored, as
+ is a slot whose trailing canary is corrupted. The
  `aligned` parameter is accepted to satisfy the Allocator interface; all pool
  payloads meet the configured alignment.
 
@@ -247,11 +250,10 @@ fn void PoolAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 {
 	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
 	if (!slot || !slot.in_use || self.free_count >= self.slot_count) return;
-
-	assert(allocator_canary_intact(
+	if (!allocator_canary_intact(
 		(char*)old_pointer + slot.requested_size,
 		self.block_size - slot.requested_size
-	), "Pool trailing canary was corrupted before release.");
+	)) return;
 
 	allocator_poison_if_testing(old_pointer, slot.requested_size);
 	slot.in_use = false;

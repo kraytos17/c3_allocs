@@ -377,7 +377,8 @@ fn bool buddy_remove_free(BuddyAllocator* self, sz order, uptr block_start) @loc
 
  The buddy address comes from XOR with the block size, which works
  because every block is aligned to its size within the carved region.
- Null, foreign, interior, and duplicate releases are ignored.
+ Null, foreign, interior, and duplicate releases are ignored, as is a
+ block whose trailing canary is corrupted.
 
  @param [&inout] self : "The allocator that owns the block"
  @param [drop] old_pointer : "The payload to release, or null"
@@ -393,10 +394,10 @@ fn void BuddyAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 	uptr block_start = (uptr)header - (uptr)header.block_offset;
 	sz order = header.order;
 	sz block_size = ((sz)BUDDY_MIN_BLOCK << order);
-	assert(allocator_canary_intact(
+	if (!allocator_canary_intact(
 		(char*)old_pointer + header.requested_size,
 		(sz)((block_start + (uptr)block_size) - ((uptr)old_pointer + (uptr)header.requested_size))
-	), "Buddy trailing canary was corrupted before release.");
+	)) return;
 
 	allocator_poison_if_testing(old_pointer, header.requested_size);
 	header.magic = 0;
@@ -446,7 +447,8 @@ fn bool BuddyAllocator.canary_intact(&self, void* pointer)
  The block shrinks in place when the smaller payload fits. Growth
  allocates a replacement first, copies the common prefix, and releases
  the old block only after the copy succeeds. On any failure the old
- block and allocator state remain unchanged.
+ block and allocator state remain unchanged. A corrupted trailing canary
+ fails the resize with `INVALID_ALLOC_SIZE` and preserves the block.
 
  @param [&inout] self : "The allocator that owns the block"
  @param [drop] old_pointer : "The payload pointer to resize"
@@ -473,10 +475,11 @@ fn void*? BuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz alignm
 	sz max_fit = block_size - (sz)(old_addr - block_start);
 	if (mem::ptr_is_aligned(old_pointer, effective) && new_size <= max_fit)
 	{
-		assert(allocator_canary_intact(
+		// A corrupted canary fails the resize and preserves the block.
+		if (!allocator_canary_intact(
 			(char*)old_pointer + header.requested_size,
 			(sz)((block_start + (uptr)block_size) - ((uptr)old_pointer + (uptr)header.requested_size))
-		), "Buddy trailing canary was corrupted before resize.");
+		)) return mem::INVALID_ALLOC_SIZE~;
 
 		header.requested_size = new_size;
 		allocator_fill_canary(

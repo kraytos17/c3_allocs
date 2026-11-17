@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install the C3 compiler
+        run: |
+          curl -sL -o /tmp/c3-linux.tar.gz https://github.com/c3lang/c3c/releases/download/v0.8.6/c3-linux.tar.gz
+          mkdir -p /tmp/c3
+          tar -xzf /tmp/c3-linux.tar.gz -C /tmp/c3
+          echo "/tmp/c3/c3" >> "$GITHUB_PATH"
+
+      - name: Show compiler version
+        run: c3c --version
+
+      - name: Check formatting, tests, and build
+        run: make check
+
+      - name: Run benchmarks
+        timeout-minutes: 20
+        run: make bench

@@ -237,6 +237,80 @@ fn bool FreeListAllocator.owns(&self, void* pointer) => freelist_used_header((Fr
 fn void FreeListAllocator.set_policy(&self, FreeListPolicy policy) => self.best_fit = policy == BEST_FIT;
 
 <*
+ Verify the free-list structural invariants.
+
+ Walks the doubly linked free list and checks every range: node magic,
+ backward links, minimum size, containment in the buffer, footer magic and
+ size, pairwise non-overlap, and that the size sum matches `free_bytes`.
+ Returns false instead of crashing on a corrupt list, and caps the walk so
+ a cycled list still terminates. Runs automatically at the end of every
+ mutating operation in test builds; call it directly in tests after
+ hand-rolled operation sequences.
+
+ @param [&in] self : "The allocator to verify"
+ @return "True when all invariants hold"
+*>
+fn bool FreeListAllocator.debug_verify(&self)
+{
+	if (!self.data.ptr)
+	{
+		return self.free_head == null && self.free_bytes == 0;
+	}
+
+	uptr base_addr = (uptr)self.data.ptr;
+	uptr buffer_end = base_addr + (uptr)self.data.len;
+	// Cap the walk so a cycled list still terminates.
+	sz max_nodes = self.free_bytes > 0 ? self.free_bytes / (sz)FreeListFooter::size + 2 : 1;
+	sz count = 0;
+	sz sum = 0;
+	FreeListFreeBlock* previous = null;
+	FreeListFreeBlock* block = self.free_head;
+	while (block)
+	{
+		count++;
+		if (count > max_nodes) return false;
+
+		uptr addr = (uptr)block;
+		if (block.magic != FREE_LIST_NODE_MAGIC) return false;
+		if (block.previous != previous) return false;
+		if (block.size < (sz)FREE_LIST_MIN_RANGE) return false;
+		if (addr < base_addr) return false;
+		if (block.size < 0 || addr > uptr::max - (uptr)block.size) return false;
+		if (addr + (uptr)block.size > buffer_end) return false;
+
+		FreeListFooter* footer = (FreeListFooter*)(addr + (uptr)block.size - (uptr)FreeListFooter::size);
+		if (footer.magic != FREE_LIST_FOOTER_MAGIC) return false;
+		if (footer.size != block.size) return false;
+
+		sum += block.size;
+		if (sum > self.data.len) return false;
+		previous = block;
+		block = block.next;
+	}
+	if (sum != self.free_bytes) return false;
+
+	FreeListFreeBlock* a = self.free_head;
+	while (a)
+	{
+		uptr a_start = (uptr)a;
+		uptr a_end = a_start + (uptr)a.size;
+		FreeListFreeBlock* b = self.free_head;
+		while (b)
+		{
+			if (b != a)
+			{
+				uptr b_start = (uptr)b;
+				uptr b_end = b_start + (uptr)b.size;
+				if (a_start < b_end && b_start < a_end) return false;
+			}
+			b = b.next;
+		}
+		a = a.next;
+	}
+	return true;
+}
+
+<*
  Unlink a free range from the doubly linked free list.
 
  @param [&inout] self : "The allocator owning the free list"
@@ -394,6 +468,10 @@ fn FreeListUsedHeader* freelist_used_header(FreeListAllocator* self, void* point
 *>
 fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "Free-list invariant violated.");
+	$endif
+
 	if (size <= 0) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 	if (!self.free_head || !self.data.ptr) return mem::OUT_OF_MEMORY~;
@@ -509,7 +587,8 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
  smaller payload fits, publishing the tail as a free range. Otherwise a
  replacement is acquired first and the old contents are copied; the old
  block is released only after the copy succeeds. On any failure the old
- block and allocator state remain unchanged.
+ block and allocator state remain unchanged. A corrupted trailing canary
+ fails the resize with `INVALID_ALLOC_SIZE` and preserves the block.
 
  @param [&inout] self : "The allocator that owns the block"
  @param [drop] old_pointer : "The payload pointer to resize"
@@ -520,6 +599,10 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 *>
 fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz alignment = 0) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "Free-list invariant violated.");
+	$endif
+
 	if (!old_pointer || new_size <= 0) return mem::INVALID_ALLOC_SIZE~;
 	if (!allocator_valid_alignment(alignment)) return mem::INVALID_ALLOC_SIZE~;
 
@@ -542,10 +625,11 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 	{
 		if (new_size <= max_fit)
 		{
-			assert(allocator_canary_intact(
+			// A corrupted canary fails the resize and preserves the block.
+			if (!allocator_canary_intact(
 				(char*)old_pointer + old_requested,
 				(sz)((block_start + (uptr)block_size) - ((uptr)old_addr + (uptr)old_requested))
-			), "Free-list trailing canary was corrupted before resize.");
+			)) return mem::INVALID_ALLOC_SIZE~;
 
 			sz total_needed = (sz)payload_offset + new_size;
 			sz alloc_size = allocator_split_size(
@@ -585,10 +669,10 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 				sz combined = block_size + next.size;
 				if (combined - (sz)payload_offset >= new_size)
 				{
-					assert(allocator_canary_intact(
+					if (!allocator_canary_intact(
 						(char*)old_pointer + old_requested,
 						(sz)((block_start + (uptr)block_size) - ((uptr)old_addr + (uptr)old_requested))
-					), "Free-list trailing canary was corrupted before resize.");
+					)) return mem::INVALID_ALLOC_SIZE~;
 
 					freelist_unlink(self, next);
 					self.free_bytes -= next.size;
@@ -640,7 +724,8 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 
  The range is published through its boundary tags, merging with free
  neighbours in constant time. Null, foreign, interior, and duplicate
- releases are ignored. The `aligned` argument satisfies the Allocator
+ releases are ignored, as is a block whose trailing canary is corrupted:
+ leaking is safer than merging a possibly-overwritten range. The `aligned` argument satisfies the Allocator
  interface; alignment is recovered from the allocation header.
 
  @param [&inout] self : "The allocator that owns the block"
@@ -649,9 +734,11 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 *>
 fn void FreeListAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "Free-list invariant violated.");
+	$endif
 	if (!old_pointer) return;
 
-	(void)aligned;
 	FreeListUsedHeader* header = freelist_used_header(self, old_pointer);
 	if (!header) return;
 
@@ -660,10 +747,12 @@ fn void FreeListAllocator.release(&self, void* old_pointer, bool aligned) @dynam
 	sz block_size = header.block_size;
 	if (block_size < FreeListFreeBlock::size) return;
 
-	assert(allocator_canary_intact(
+	// A corrupted canary ignores the release: leaking the range is safer
+	// than merging a possibly-overwritten block.
+	if (!allocator_canary_intact(
 		(char*)old_pointer + header.requested_size,
 		(sz)((block_start + (uptr)block_size) - ((uptr)old_pointer + (uptr)header.requested_size))
-	), "Free-list trailing canary was corrupted before release.");
+	)) return;
 
 	allocator_poison_if_testing(old_pointer, header.requested_size);
 	header.in_use = false;
@@ -701,6 +790,10 @@ fn bool FreeListAllocator.canary_intact(&self, void* pointer)
 *>
 fn void FreeListAllocator.clear(&self)
 {
+	$if env::TESTING:
+		defer assert(self.debug_verify(), "Free-list invariant violated.");
+	$endif
+
 	self.free_head = null;
 	self.free_bytes = 0;
 	if (self.data.len >= FREE_LIST_MIN_RANGE && self.data.ptr)

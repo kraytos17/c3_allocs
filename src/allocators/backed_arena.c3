@@ -575,7 +575,8 @@ fn sz backed_arena_page_canary_len(BackedArenaPage* page, void* payload) @local
  the requested alignment, and fit. Other cases allocate a replacement first,
  copy the common prefix, and only then release/reclaim the old block. If the
  replacement fails, the original block remains valid and arena state is
- unchanged.
+ unchanged. A corrupted trailing canary fails the resize with
+ `INVALID_ALLOC_SIZE` and preserves the block.
 
  @param [&inout] self : "The arena that owns the block"
  @param [drop] old_pointer : "The allocation to resize"
@@ -623,10 +624,10 @@ fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	BackedArenaPage* old_page = *page_link;
 	if (new_size <= old_page.requested_size && mem::ptr_is_aligned(old_pointer, effective_alignment))
 	{
-		assert(allocator_canary_intact(
+		if (!allocator_canary_intact(
 			(char*)old_pointer + old_page.requested_size,
 			backed_arena_page_canary_len(old_page, old_pointer)
-		), "Backed arena trailing canary was corrupted before resize.");
+		)) return mem::INVALID_ALLOC_SIZE~;
 
 		old_page.requested_size = new_size;
 		allocator_fill_canary((char*)old_pointer + new_size, backed_arena_page_canary_len(old_page, old_pointer));
@@ -640,7 +641,9 @@ fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	sz copy_size = old_page.requested_size < new_size ? old_page.requested_size : new_size;
 	mem::copy(replacement, old_pointer, copy_size, mem::DEFAULT_MEM_ALIGNMENT, mem::DEFAULT_MEM_ALIGNMENT);
 	page_link = backed_arena_find_page_link(self, old_pointer);
-	assert(page_link, "Resized page disappeared from the arena page list.");
+
+	// Acquire never removes pages, so the link must still exist
+	if (!page_link) return mem::OUT_OF_MEMORY~;
 	*page_link = old_page.next;
 	backed_arena_free_page(self.backing_allocator, old_page);
 	return replacement;
@@ -651,7 +654,8 @@ fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 
  Overflow allocations return their backing block immediately. Initial-buffer
  allocations reclaim space only when they are the newest initial-buffer block.
- Null and non-owned pointers are ignored.
+ Null and non-owned pointers are ignored, as is a block whose trailing
+ canary is corrupted.
 
  @param [&inout] self : "The arena that owns the block"
  @param [drop] old_pointer : "The block to release, or null"
@@ -675,10 +679,10 @@ fn void BackedArenaAllocator.release(&self, void* old_pointer, bool aligned) @dy
 	if (!page_link) return;
 
 	BackedArenaPage* page = *page_link;
-	assert(allocator_canary_intact(
+	if (!allocator_canary_intact(
 		(char*)old_pointer + page.requested_size,
 		backed_arena_page_canary_len(page, old_pointer)
-	), "Backed arena trailing canary was corrupted before release.");
+	)) return;
 
 	allocator_poison_if_testing(old_pointer, page.requested_size);
 	*page_link = page.next;

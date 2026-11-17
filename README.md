@@ -75,6 +75,11 @@ make clean       # Remove C3 build artifacts
 `build/`. The `make fmt` target edits files in `src/` and `test/`; review its
 changes before committing them. Formatting rules are in the root `.c3fmt` file.
 
+Pushes and pull requests also run `.github/workflows/ci.yml`, which
+installs `c3c` v0.8.6 from the official release assets and then runs
+`make check` (format check, full test suite, build) followed by
+`make bench`.
+
 ## Benchmarks
 
 `make bench` runs `bench/allocators_bench.c3` through `c3c compile-benchmark`.
@@ -126,12 +131,11 @@ metadata for tiny requests. Tracking overhead is about 3.4x here:
 the wrapped path got five times faster while the map-based bookkeeping
 stays constant, which is expected for a debug wrapper.
 
-Two `-O2` caveats: `assert` is compiled out entirely, including its
-condition expression, so assertions must never carry side effects (an
-out-param write inside `assert(...)` once left the pool's slot stride at
-zero under `-O2`), and the trailing canaries are debug-time checks, so
-they verify at `-O0`/`-O1` and vanish at `-O2`, matching mimalloc's
-debug/release split.
+One `-O2` caveat: `assert` is compiled out entirely, including its
+condition expression, so assertions never carry side effects. Corruption
+checks that must survive optimization are plain runtime guards instead:
+a corrupted trailing canary fails `resize` with `INVALID_ALLOC_SIZE`
+and makes `release` ignore the block, at every optimization level.
 
 ## Choosing an allocator
 
@@ -264,10 +268,12 @@ alloc::free(&pool, item); // The released slot can be reused.
   instead of passing raw sizes.
 - Requests larger than the configured payload size, with unsupported
   alignment, or after all slots are in use fail without consuming a slot.
-- `release` makes a valid slot available for reuse. Null, foreign, interior,
-  and duplicate-release pointers are ignored.
+- `release` makes a valid slot available for reuse. Null, foreign,
+  interior, duplicate-release, and canary-corrupted pointers are
+  ignored.
 - `resize` stays in the same slot and can only change the requested size up to
-  the configured payload size. It never moves or grows the slot.
+  the configured payload size. It never moves or grows the slot. A
+  corrupted canary fails the resize with `INVALID_ALLOC_SIZE`.
 - The pool is not thread-safe and does not run destructors for values stored
   in its memory.
 
@@ -313,8 +319,10 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
   `clear` resets to the beginning; `free` also detaches the arena from its
   borrowed initial buffer and backing allocator, so it must be
   reinitialized before further use.
-- `release` frees overflow blocks immediately. For allocations inside the
-  initial buffer, only a last-in-first-out release sequence reclaims space.
+- `release` frees overflow blocks immediately, unless the block's canary
+  is corrupted (then the block is ignored). For allocations inside the
+  initial buffer, only a last-in-first-out release sequence reclaims
+  space.
 - `initial_served()` and `overflow_served()` count lifetime allocations per
   path. A high overflow share means the initial buffer is undersized for
   the workload.
@@ -330,6 +338,7 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
 - `resize` preserves the common prefix. It may resize the newest initial-buffer
   allocation in place; otherwise it acquires a replacement before releasing
   the old allocation. On failure, it leaves the original allocation valid.
+  A corrupted overflow canary fails with `INVALID_ALLOC_SIZE`.
 - The arena is not thread-safe. Reset/free do not run destructors.
 
 ## Using `FreeListAllocator`
@@ -368,8 +377,9 @@ list.clear(); // Discards all allocations at once.
 - `acquire` aligns payloads, supports `ZERO` init, and leaves state unchanged
   on failure. A range is split only when the remainder can hold a free node
   plus its footer.
-- `release` ignores null, foreign, interior, and duplicate releases, then
-  coalesces with adjacent free neighbours through the boundary tags. The
+- `release` ignores null, foreign, interior, duplicate, and
+  canary-corrupted releases, then coalesces with adjacent free
+  neighbours through the boundary tags. The
   footer is only trusted together with the node at the implied range
   start, so forged footers in user data do not corrupt the list.
 - Selection is `FIRST_FIT` by default; `set_policy` switches to `BEST_FIT`,
@@ -378,7 +388,8 @@ list.clear(); // Discards all allocations at once.
   splinters when sizes vary widely.
 - `resize` preserves the prefix. It shrinks in place, grows into an adjacent
   free range when possible (identified by the boundary node in constant
-  time), otherwise moves. Failure preserves the original.
+  time), otherwise moves. Failure preserves the original, including a
+  corrupted-canary failure, which reports `INVALID_ALLOC_SIZE`.
 - `largest_free()` reports the biggest contiguous range and
   `free_block_count()` how many ranges exist. Allocations larger than
   `largest_free` fail even when `bytes_free` is bigger.
@@ -519,6 +530,7 @@ alloc::free(&buddy, item); // Merges with its free buddy when possible.
   a request larger than `largest_free` fails even when `bytes_free` is
   bigger. `clear()` restores one block.
 - `resize` shrinks in place and otherwise moves with prefix preservation.
+  A corrupted canary fails the resize with `INVALID_ALLOC_SIZE`.
 - The allocator is not thread-safe and does not run destructors.
 
 ## Using `BitmapBuddyAllocator`
@@ -595,9 +607,12 @@ similar to mimalloc's debug mode:
 - On `acquire`, every byte between the requested payload end and the end
   of the block is filled with `0xC3`. When the block packs exactly, the
   canary region is empty and the check is trivially true.
-- On `release` and on the in-place paths of `resize`, the canary is
-  verified; a mismatch aborts with a message naming the allocator. The
-  canary is refilled after in-place shrinks.
+- On the in-place paths of `resize`, the canary is verified; a mismatch
+  fails the resize with `INVALID_ALLOC_SIZE` and preserves the block.
+  On `release`, a mismatch ignores the block: leaking is safer than
+  merging a possibly-overwritten range. These are runtime checks, so
+  they hold at `-O2` where `assert` is compiled out. The canary is
+  refilled after in-place shrinks and grows.
 - `PoolAllocator`, `FreeListAllocator`, `BuddyAllocator`, and overflow
   pages of `BackedArenaAllocator` participate. Initial-buffer allocations
   of `BackedArenaAllocator` have no trailing slack and are not covered.
@@ -605,6 +620,11 @@ similar to mimalloc's debug mode:
 - `canary_intact(pointer)` is a public query on the covered allocators for
   checking a live payload at any time. The pointer must be a payload the
   allocator returned.
+- `FreeListAllocator.debug_verify()` checks the free-list invariants
+  (node magic and links, footers, buffer containment, non-overlap, and
+  the `free_bytes` total). It runs automatically at the end of every
+  mutating free-list operation in test builds, and is a public query
+  for hand-rolled sequences in tests.
 - On `release` under test builds (`env::TESTING`), the released payload
   region is poisoned with `0xAA`, matching the standard library's test
   fills, so use-after-release reads are visible. Release builds skip
@@ -628,13 +648,15 @@ similar to mimalloc's debug mode:
 - `bench/allocators_bench.c3` — allocator benchmarks run by `make bench`.
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
   `test/freelist_test.c3`, `test/buddy_test.c3`,
-  `test/bitmap_buddy_test.c3`,
-  `test/sizeclass_test.c3`,
+  `test/bitmap_buddy_test.c3`, `test/sizeclass_test.c3`,
   `test/scratch_test.c3`, `test/debug_test.c3`, `test/tracking_test.c3`,
-  and `test/common_test.c3` — allocator behavior
-  and failure-path tests.
+  `test/common_test.c3`, `test/stress_test.c3`, and
+  `test/hardening_test.c3` — allocator behavior, failure-path, storm,
+  alignment-torture, and canary-guard tests.
 - `project.json` — C3 compiler project configuration.
 - `Makefile` — build, test, formatting, and clean targets.
+- `.github/workflows/ci.yml` — the CI workflow (format check, tests,
+  build, benchmarks) run on pushes and pull requests.
 - `.c3fmt` — formatter configuration for `c3fmt`.
 - `lib/` — configured C3 dependency search directory; currently no dependency
   is vendored there. The Makefile creates the directory before C3 build/test
