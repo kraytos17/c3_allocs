@@ -5,7 +5,7 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains seven allocators:
+The repository currently contains nine allocators:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
@@ -30,10 +30,15 @@ The repository currently contains seven allocators:
   It carves the largest aligned power-of-two region from the buffer, splits
   blocks on demand, and merges a freed block with its free buddy (found by
   address XOR), so full release restores one contiguous block.
+- **`BitmapBuddyAllocator`** — a headerless binary buddy allocator. Per-order
+  `alloc`/`split` bitmaps carved from the region front replace per-block
+  headers, so a 16-byte request consumes exactly 16 bytes. The block order
+  is recovered from the split bits on release. It trades the per-request
+  trailing canary for that header saving.
 
 ## Requirements
 
-- The C3 compiler, `c3c`, with support for language revision 1.
+- The C3 compiler, `c3c`, with support for language revision 0.8.6 and above.
 - GNU Make for the convenience targets below.
 - `c3fmt` is optional; it is used by the formatting targets.
 
@@ -114,6 +119,7 @@ One reference run on my machine (64-byte requests, batches of
 | Mixed small sizes with bounded waste              | `SizeClassAllocator`  |
 | General variable sizes inside one buffer          | `FreeListAllocator`   |
 | Variable sizes with minimal external fragmentation| `BuddyAllocator`      |
+| Tiny allocations where headers cost too much      | `BitmapBuddyAllocator`|
 
 Rules of thumb: prefer the simplest allocator that covers the lifetime
 pattern; arenas and scratch beat everything on speed but cannot free
@@ -290,7 +296,11 @@ arena.free(); // Frees remaining overflow blocks; initial_storage is borrowed.
   of freeing them, so steady-state frame loops stop calling the backing
   allocator. `page_pool_count()` reports parked pages and `prune_pool()`
   returns them to the backing allocator. `reset` and `clear` always free;
-  `free` also drains the pool.
+  `free` also drains the pool. When a pooled page is too small for a
+  request, its backing block is grown through the backing allocator first;
+  because a pooled page holds no live data, this is safe even when the
+  backing allocator moves the block. Live pages are never grown, since
+  that would relocate their payloads.
 - `resize` preserves the common prefix. It may resize the newest initial-buffer
   allocation in place; otherwise it acquires a replacement before releasing
   the old allocation. On failure, it leaves the original allocation valid.
@@ -434,6 +444,37 @@ alloc::free(&buddy, item); // Merges with its free buddy when possible.
 - `resize` shrinks in place and otherwise moves with prefix preservation.
 - The allocator is not thread-safe and does not run destructors.
 
+## Using `BitmapBuddyAllocator`
+
+`BitmapBuddyAllocator` is the headerless variant of the buddy allocator.
+Per-order `alloc` and `split` bitmaps are carved from the front of the
+region; every block byte is payload, and the block order is recovered from
+the split bits on release instead of a header.
+
+```c3
+char[4096] storage;
+allocators::BitmapBuddyAllocator buddy;
+buddy.init(storage[..]);
+
+void* item = alloc::malloc(&buddy, 16); // Consumes exactly 16 bytes.
+alloc::free(&buddy, item);
+```
+
+### Bitmap-buddy behavior and constraints
+
+- Orders double from a 16-byte leaf. A request's cost is the covering
+  block, with no header, so tiny allocations waste almost nothing.
+- The managed base is aligned to the served block size so any valid
+  alignment up to the top block works; carving bitmaps plus that alignment
+  costs region capacity, which `capacity()` reports honestly.
+- There is no per-request canary (there is no header to locate it). Test
+  builds poison whole freed blocks; double releases are detected through
+  the `alloc` bit and ignored.
+- `largest_free()`, `free_block_count()`, `bytes_free()`/`bytes_used()`,
+  `owns()`, and `clear()` mirror the headered buddy. `resize` shrinks in
+  place, otherwise moves with prefix preservation.
+- The allocator is not thread-safe and does not run destructors.
+
 ### Shared core and typed helpers
 
 - `src/allocators/common.c3` holds the shared alignment, padding,
@@ -500,6 +541,7 @@ similar to mimalloc's debug mode:
 - `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.
 - `src/allocators/freelist.c3` — the variable-size free-list implementation.
 - `src/allocators/buddy.c3` — the binary buddy allocator.
+- `src/allocators/bitmap_buddy.c3` — the headerless bitmap buddy allocator.
 - `src/allocators/sizeclass.c3` — the size-class dispatcher over pools.
 - `src/allocators/scratch.c3` — the single-frame scratch allocator.
 - `src/allocators/typed.c3` — the generic typed pool facade.
@@ -507,6 +549,7 @@ similar to mimalloc's debug mode:
 - `bench/allocators_bench.c3` — allocator benchmarks run by `make bench`.
 - `test/arena_test.c3`, `test/pool_test.c3`, `test/backed_arena_test.c3`,
   `test/freelist_test.c3`, `test/buddy_test.c3`,
+  `test/bitmap_buddy_test.c3`,
   `test/sizeclass_test.c3`,
   `test/scratch_test.c3`, `test/debug_test.c3`, and
   `test/common_test.c3` — allocator behavior and failure-path tests.

@@ -455,11 +455,57 @@ fn void*? backed_arena_acquire_page(BackedArenaAllocator* self, sz size, AllocIn
 	while (*pool_link)
 	{
 		BackedArenaPage* pooled = *pool_link;
+		if (pooled.allocation_alignment >= alignment && pooled.block_size < total_size)
+		{
+			// A pooled page holds no live data, so growing its backing block
+			// through the backing allocator is safe even if the block moves.
+			void*? grown_opt = self.backing_allocator.resize(
+				pooled.descriptor_block,
+				total_size,
+				pooled.allocation_alignment
+			);
+			if (catch grown_opt)
+			{
+				pool_link = &(*pool_link).next;
+				continue;
+			}
+
+			void* grown = grown_opt;
+			BackedArenaPage* moved = grown;
+			if (grown != pooled.descriptor_block)
+			{
+				*moved = *pooled;
+				*pool_link = pooled.next;
+				pooled = moved;
+			}
+
+			pooled.block_size = total_size;
+			*pool_link = pooled.next;
+			self.pooled_count--;
+
+			void* payload = (char*)grown + payload_offset;
+			sz sequence = self.next_sequence;
+			self.next_sequence++;
+			pooled.next = self.pages;
+			pooled.payload = payload;
+			pooled.requested_size = size;
+			pooled.sequence = sequence;
+			self.pages = pooled;
+			self.overflow_total++;
+			allocator_fill_canary(
+				(char*)payload + size,
+				(sz)(((uptr)grown + (uptr)pooled.block_size) - ((uptr)payload + (uptr)size))
+			);
+
+			allocator_zero_if(payload, size, init_type);
+			return payload;
+		}
 		if (pooled.block_size >= total_size && pooled.allocation_alignment >= alignment)
 		{
 			*pool_link = pooled.next;
 			self.pooled_count--;
 			void* block = pooled.descriptor_block;
+
 			void* payload = (char*)block + payload_offset;
 			sz sequence = self.next_sequence;
 			self.next_sequence++;

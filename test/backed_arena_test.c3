@@ -548,16 +548,19 @@ fn void backed_arena_reset_retaining_reuses_only_fitting_pages() @test
 	assert(arena.page_pool_count() == 1);
 	sz backing_used = backing_arena.bytes_reserved();
 
-	// A larger request cannot reuse the small pooled page.
+	// A larger request grows the pooled page through the backing allocator
+	// instead of allocating a fresh block, because a pooled page holds no
+	// live data. The backing arena's reserved bytes grow with the page.
 	(void)arena.acquire(512, alloc::AllocInitType.NO_ZERO)!!;
-	assert(arena.page_pool_count() == 1);
+	assert(arena.page_pool_count() == 0);
+	assert(arena.overflow_count() == 1);
 	assert(backing_arena.bytes_reserved() > backing_used);
 
-	// A stricter alignment cannot reuse the default-aligned pooled pages.
+	// A stricter alignment cannot reuse the default-aligned pooled page.
 	arena.reset_retaining(mark);
-	assert(arena.page_pool_count() == 2);
+	assert(arena.page_pool_count() == 1);
 	(void)arena.acquire(48, alloc::AllocInitType.NO_ZERO, 64)!!;
-	assert(arena.page_pool_count() == 2);
+	assert(arena.page_pool_count() == 1);
 	assert(arena.overflow_count() == 1);
 }
 
