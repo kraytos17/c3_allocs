@@ -26,6 +26,7 @@ const BITMAP_BUDDY_MAX_ORDERS = 64;
 struct BitmapBuddyAllocator (Allocator) @mustinit
 {
 	BitmapBuddyFree*[BITMAP_BUDDY_MAX_ORDERS] free_heads;
+	sz[BITMAP_BUDDY_MAX_ORDERS] free_counts;
 	char*[BITMAP_BUDDY_MAX_ORDERS] alloc_bits;
 	char*[BITMAP_BUDDY_MAX_ORDERS] split_bits;
 	char[] data;
@@ -119,17 +120,20 @@ fn BitmapBuddyAllocator* BitmapBuddyAllocator.init(&self, char[] storage)
 	for (sz i = 0; i < BITMAP_BUDDY_MAX_ORDERS; i++)
 	{
 		self.free_heads[i] = null;
+		self.free_counts[i] = 0;
 		self.alloc_bits[i] = null;
 		self.split_bits[i] = null;
 	}
 	if (storage.len < BITMAP_BUDDY_LEAF * 4 || !storage.ptr) return self;
 
 	BitmapBuddyFree*[BITMAP_BUDDY_MAX_ORDERS] heads;
+	sz[BITMAP_BUDDY_MAX_ORDERS] counts;
 	char*[BITMAP_BUDDY_MAX_ORDERS] alloc_bits;
 	char*[BITMAP_BUDDY_MAX_ORDERS] split_bits;
 	for (sz i = 0; i < BITMAP_BUDDY_MAX_ORDERS; i++)
 	{
 		heads[i] = null;
+		counts[i] = 0;
 		alloc_bits[i] = null;
 		split_bits[i] = null;
 	}
@@ -224,6 +228,7 @@ fn BitmapBuddyAllocator* BitmapBuddyAllocator.init(&self, char[] storage)
 			BitmapBuddyFree* block = (BitmapBuddyFree*)pos;
 			block.next = heads[k];
 			heads[k] = block;
+			counts[k]++;
 			if (index % 2 == 0 && k < max_order)
 			{
 				bitmap_buddy_set_bit(split_bits[k + 1], index >> 1);
@@ -234,6 +239,7 @@ fn BitmapBuddyAllocator* BitmapBuddyAllocator.init(&self, char[] storage)
 	}
 
 	self.free_heads = heads;
+	self.free_counts = counts;
 	self.alloc_bits = alloc_bits;
 	self.split_bits = split_bits;
 	self.buddy_base = buddy_base;
@@ -277,15 +283,7 @@ fn sz BitmapBuddyAllocator.bytes_used(&self) => self.managed_bytes - self.free_b
 fn sz BitmapBuddyAllocator.free_block_count(&self)
 {
 	sz count = 0;
-	for (sz i = 0; i <= self.max_order; i++)
-	{
-		BitmapBuddyFree* block = self.free_heads[i];
-		while (block)
-		{
-			count++;
-			block = block.next;
-		}
-	}
+	for (sz i = 0; i <= self.max_order; i++) count += self.free_counts[i];
 	return count;
 }
 
@@ -299,7 +297,7 @@ fn sz BitmapBuddyAllocator.largest_free(&self)
 {
 	for (sz i = self.max_order; i >= 0; i--)
 	{
-		if (self.free_heads[i]) return ((sz)BITMAP_BUDDY_LEAF << i);
+		if (self.free_counts[i] > 0) return ((sz)BITMAP_BUDDY_LEAF << i);
 	}
 	return 0;
 }
@@ -322,7 +320,9 @@ fn void BitmapBuddyAllocator.clear(&self)
 			self.alloc_bits[i][j] = 0;
 			self.split_bits[i][j] = 0;
 		}
+
 		self.free_heads[i] = null;
+		self.free_counts[i] = 0;
 	}
 
 	self.free_bytes = 0;
@@ -336,6 +336,7 @@ fn void BitmapBuddyAllocator.clear(&self)
 			BitmapBuddyFree* block = (BitmapBuddyFree*)pos;
 			block.next = self.free_heads[k];
 			self.free_heads[k] = block;
+			self.free_counts[k]++;
 			if (index % 2 == 0 && k < self.max_order)
 			{
 				bitmap_buddy_set_bit(self.split_bits[k + 1], index >> 1);
@@ -449,6 +450,8 @@ fn BitmapBuddyFree** bitmap_buddy_find_fit(
 	BitmapBuddyFree** found_link = null;
 	for (sz k = from_order; k <= self.max_order; k++)
 	{
+		if (!self.free_counts[k]) continue;
+
 		BitmapBuddyFree** link = &self.free_heads[k];
 		while (*link)
 		{
@@ -463,6 +466,7 @@ fn BitmapBuddyFree** bitmap_buddy_find_fit(
 		if (found_order >= 0) break;
 	}
 	if (found_order < 0) return null;
+
 	*order_out = found_order;
 	return found_link;
 }
@@ -501,6 +505,7 @@ fn void*? BitmapBuddyAllocator.acquire(&self, sz size, AllocInitType init_type, 
 	sz block_size = ((sz)BITMAP_BUDDY_LEAF) << found_order;
 	sz index = (sz)((block_start - self.buddy_base) / (uptr)block_size);
 	*found_link = (*found_link).next;
+	self.free_counts[found_order]--;
 	for (sz k = found_order; k > leaf_order; k--)
 	{
 		sz half = ((sz)BITMAP_BUDDY_LEAF) << (k - 1);
@@ -509,6 +514,7 @@ fn void*? BitmapBuddyAllocator.acquire(&self, sz size, AllocInitType init_type, 
 		BitmapBuddyFree* buddy = (BitmapBuddyFree*)buddy_start;
 		buddy.next = self.free_heads[k - 1];
 		self.free_heads[k - 1] = buddy;
+		self.free_counts[k - 1]++;
 		index <<= 1;
 	}
 
@@ -535,6 +541,7 @@ fn bool bitmap_buddy_remove_free(BitmapBuddyAllocator* self, sz order, uptr bloc
 		if ((uptr)*link == block_start)
 		{
 			*link = (*link).next;
+			self.free_counts[order]--;
 			return true;
 		}
 		link = &(*link).next;
@@ -588,6 +595,7 @@ fn void BitmapBuddyAllocator.release(&self, void* old_pointer, bool aligned) @dy
 	BitmapBuddyFree* block = (BitmapBuddyFree*)merged_start;
 	block.next = self.free_heads[merged_order];
 	self.free_heads[merged_order] = block;
+	self.free_counts[merged_order]++;
 }
 
 <*
@@ -653,6 +661,7 @@ fn void*? BitmapBuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 			BitmapBuddyFree* buddy = (BitmapBuddyFree*)buddy_start;
 			buddy.next = self.free_heads[k - 1];
 			self.free_heads[k - 1] = buddy;
+			self.free_counts[k - 1]++;
 			cursor_index <<= 1;
 		}
 

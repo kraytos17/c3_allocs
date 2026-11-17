@@ -102,27 +102,36 @@ One reference run on my machine (64-byte requests unless noted, batches of
 
 | Benchmark                            | Avg per batch |
 | ------------------------------------ | ------------- |
-| arena acquire/release                | 1.60 us       |
-| backed arena acquire/release         | 2.06 us       |
-| pool acquire/release                 | 3.02 us       |
-| free-list first-fit acquire/release  | 3.48 us       |
-| free-list best-fit acquire/release   | 3.54 us       |
-| tracking over free-list acquire/release | 5.84 us    |
-| size-class acquire/release           | 10.87 us      |
-| buddy acquire/release                | 12.27 us      |
-| bitmap buddy acquire/release         | 18.34 us      |
-| bitmap buddy 16-byte acquire/release | 21.22 us      |
-| arena clear cycle                    | 1.00 us       |
-| scratch clear cycle                  | 1.37 us       |
-| free-list clear cycle                | 1.79 us       |
-| buddy clear cycle                    | 3.65 us       |
-| free-list fragmented release         | 6.75 us       |
+| arena acquire/release                | 0.35 us       |
+| backed arena acquire/release         | 0.50 us       |
+| pool acquire/release                 | 1.21 us       |
+| free-list first-fit acquire/release  | 0.70 us       |
+| free-list best-fit acquire/release   | 0.75 us       |
+| tracking over free-list acquire/release | 2.42 us    |
+| size-class acquire/release           | 1.30 us       |
+| buddy acquire/release                | 1.48 us       |
+| bitmap buddy acquire/release         | 3.29 us       |
+| bitmap buddy 16-byte acquire/release | 3.71 us       |
+| arena clear cycle                    | 0.27 us       |
+| scratch clear cycle                  | 0.27 us       |
+| free-list clear cycle                | 0.50 us       |
+| buddy clear cycle                    | 0.61 us       |
+| free-list fragmented release         | 1.26 us       |
 
-The bitmap buddy is slower per operation than the headered one because
-release must walk the split bits to recover the order; its win is zero
-per-allocation metadata, which matters only for tiny requests. Tracking
-adds about 1.7x over the plain free-list hot path, the price of the
-per-allocation record bookkeeping in a debug wrapper.
+The numbers are from an `-O2` build (`make bench` now passes `-O2` to the
+compiler); auto-vectorization pays off across the board. The bitmap buddy
+stays slower per operation than the headered one because release walks
+the split bits to recover the order; its win is zero per-allocation
+metadata for tiny requests. Tracking overhead is about 3.4x here:
+the wrapped path got five times faster while the map-based bookkeeping
+stays constant, which is expected for a debug wrapper.
+
+Two `-O2` caveats: `assert` is compiled out entirely, including its
+condition expression, so assertions must never carry side effects (an
+out-param write inside `assert(...)` once left the pool's slot stride at
+zero under `-O2`), and the trailing canaries are debug-time checks, so
+they verify at `-O0`/`-O1` and vanish at `-O2`, matching mimalloc's
+debug/release split.
 
 ## Choosing an allocator
 
@@ -401,7 +410,9 @@ tracker.free();
 - `report_leaks()` prints one line per live allocation with its recorded
   file, function, and line; `check_no_leaks()` is the boolean form.
 - The record array is served by the wrapped allocator and grows by
-  doubling. `free()` releases it; check for leaks first.
+  doubling; the pointer map uses the global allocator, so an exhausted
+  backing never breaks bookkeeping. `free()` releases both; check for
+  leaks first.
 - The wrapper is not thread-safe.
 
 ## Using `SizeClassAllocator`

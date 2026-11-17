@@ -1,5 +1,6 @@
 module c3_allocs::allocators;
 
+import std::collections;
 import std::core::mem::alloc;
 import std::core::mem;
 import std::io;
@@ -16,15 +17,18 @@ const TRACKING_UNKNOWN @local = "<direct>";
  through the `$$FILE` / `$$FUNC` / `$$LINE` builtins. Direct interface
  calls are still tracked, but with an unknown location.
 
- The wrapper detects double releases of tracked pointers, keeps running
- totals, and can report leaks with their allocation sites. The record
- array is served by the wrapped allocator itself. This wrapper is not
- thread-safe.
+ Pointer lookups are O(1): a `HashMap{ulong, sz}` from the standard
+ library, keyed by the allocation pointer, maps to the record array index,
+ so release and resize do not scan the records. The record array is served
+ by the wrapped allocator itself; the map is bookkeeping and uses the
+ global allocator, so an exhausted backing never breaks the tracker. This
+ wrapper is not thread-safe.
 *>
 struct TrackingAllocator (Allocator) @mustinit
 {
 	Allocator backing;
 	TrackingRecord* entries;
+	HashMap{ulong, sz} index;
 	sz count;
 	sz capacity;
 	sz live_total;
@@ -51,7 +55,8 @@ struct TrackingRecord @local
  Initialize the tracker over a wrapped allocator.
 
  The record array is served by `backing` itself, so the tracker must be
- initialized after its backing allocator.
+ initialized after its backing allocator. The lookup map uses the global
+ allocator.
 
  @param [&out] self : "The tracker to initialize"
  @param backing : "The allocator to wrap and to serve the records"
@@ -61,6 +66,7 @@ fn TrackingAllocator* TrackingAllocator.init(&self, Allocator backing)
 {
 	self.backing = backing;
 	self.entries = null;
+	self.index.init(mem);
 	self.count = 0;
 	self.capacity = 0;
 	self.live_total = 0;
@@ -106,7 +112,7 @@ fn sz TrackingAllocator.total_count(&self) => self.total_allocs;
 fn sz TrackingAllocator.double_releases(&self) => self.unmatched_releases;
 
 <*
- Find the record for a tracked pointer.
+ Find the record index for a tracked pointer through the hash table.
 
  @param [&in] self : "The tracker to search"
  @param pointer : "The candidate pointer"
@@ -114,11 +120,9 @@ fn sz TrackingAllocator.double_releases(&self) => self.unmatched_releases;
 *>
 fn sz tracking_find(TrackingAllocator* self, void* pointer) @local
 {
-	for (sz i = 0; i < self.count; i++)
-	{
-		if (self.entries[i].pointer == pointer) return i;
-	}
-	return -1;
+	sz? index_opt = self.index.get((ulong)(uptr)pointer);
+	if (catch index_opt) return -1;
+	return index_opt;
 }
 
 <*
@@ -166,6 +170,7 @@ fn bool tracking_record(TrackingAllocator* self, void* pointer, sz size, String 
 {
 	if (self.count == self.capacity && !tracking_grow(self)) return false;
 
+	self.index.set((ulong)(uptr)pointer, self.count);
 	self.entries[self.count] = { pointer, size, file, func, line };
 	self.count++;
 	self.live_total++;
@@ -248,6 +253,8 @@ fn void*? TrackingAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 		self.entries[index].pointer = result;
 		self.entries[index].requested_size = new_size;
 		self.live_byte_total += new_size;
+		self.index.remove((ulong)(uptr)old_pointer);
+		self.index.set((ulong)(uptr)result, index);
 	}
 	return result;
 }
@@ -276,7 +283,16 @@ fn void TrackingAllocator.release(&self, void* old_pointer, bool aligned) @dynam
 
 	self.backing.release(old_pointer, aligned);
 	self.live_byte_total -= self.entries[index].requested_size;
-	self.entries[index] = self.entries[self.count - 1];
+	self.index.remove((ulong)(uptr)old_pointer);
+	sz moved_index = self.count - 1;
+	if (moved_index != index)
+	{
+		TrackingRecord moved = self.entries[moved_index];
+		self.entries[index] = moved;
+		self.index.remove((ulong)(uptr)moved.pointer);
+		self.index.set((ulong)(uptr)moved.pointer, index);
+	}
+
 	self.count--;
 	self.live_total--;
 }
@@ -312,7 +328,7 @@ fn sz TrackingAllocator.report_leaks(&self)
 fn bool TrackingAllocator.check_no_leaks(&self) => self.count == 0;
 
 <*
- Release the record array itself.
+ Release the record array and the hash table itself.
 
  Check for leaks before calling; the records are not preserved.
 
@@ -322,6 +338,7 @@ fn void TrackingAllocator.free(&self)
 {
 	if (self.entries) self.backing.release(self.entries, false);
 
+	self.index.free();
 	self.entries = null;
 	self.count = 0;
 	self.capacity = 0;

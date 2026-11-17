@@ -55,7 +55,8 @@ fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz al
 
 	sz payload_offset = allocator_align_up_size(PoolSlot::size, alignment);
 	sz slot_size;
-	assert(allocator_checked_add(payload_offset, block_size, &slot_size), "Pool block size overflows slot size.");
+	bool slot_size_ok = allocator_checked_add(payload_offset, block_size, &slot_size);
+	assert(slot_size_ok, "Pool block size overflows slot size.");
 	assert(slot_size <= sz::max - (alignment - 1), "Pool slot stride overflows.");
 	sz slot_stride = allocator_align_up_size(slot_size, alignment);
 

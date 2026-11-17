@@ -46,7 +46,7 @@ check: ## Run formatting check, tests, and build in sequence
 	$(MAKE) build
 
 bench: ## Run allocator benchmarks via c3c compile-benchmark
-	$(C3C) compile-benchmark $(BENCH_SOURCES)
+	$(C3C) -O2 compile-benchmark $(BENCH_SOURCES)
 
 clean: ## Remove C3 build artifacts
 	$(C3C) clean

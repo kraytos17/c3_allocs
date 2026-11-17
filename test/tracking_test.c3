@@ -176,3 +176,59 @@ fn void tracking_failed_acquire_leaves_no_record() @test
 	}
 	assert(false, "Expected allocation to fail with a null backing allocator.");
 }
+
+fn void tracking_high_volume_stress_with_swaps() @test
+{
+	Allocator backing = &std::core::mem::allocators::LIBC_ALLOCATOR;
+	allocators::TrackingAllocator tracker;
+	tracker.init(backing);
+
+	ulong state = 0x853C49E6748FEA9B;
+	void*[256] live = { };
+	sz live_count = 0;
+	for (sz op = 0; op < 3000; op++)
+	{
+		state ^= state << 13;
+		state ^= state >> 7;
+		state ^= state << 17;
+		ulong roll = (ulong)state % 100;
+		if (roll < 55 && live_count < 256)
+		{
+			state ^= state << 13;
+			state ^= state >> 7;
+			state ^= state << 17;
+			sz size = 1 + (sz)((ulong)state % 128);
+			void*? ptr_opt = allocators::trk_malloc(&tracker, size);
+			if (catch ptr_opt) continue;
+			live[live_count] = ptr_opt;
+			live_count++;
+		}
+		else if (roll < 92 && live_count > 0)
+		{
+			state ^= state << 13;
+			state ^= state >> 7;
+			state ^= state << 17;
+			sz idx = (sz)((ulong)state % (ulong)live_count);
+			allocators::trk_free(&tracker, live[idx]);
+			live[idx] = live[live_count - 1];
+			live_count--;
+		}
+		else if (roll < 95 && live_count > 0)
+		{
+			state ^= state << 13;
+			state ^= state >> 7;
+			state ^= state << 17;
+			sz idx = (sz)((ulong)state % (ulong)live_count);
+			sz new_size = 1 + (sz)((ulong)state % 128);
+			void*? resized = allocators::trk_realloc(&tracker, live[idx], new_size);
+			if (catch resized) continue;
+			live[idx] = resized;
+		}
+	}
+	assert(tracker.double_releases() == 0);
+	for (sz i = 0; i < live_count; i++) allocators::trk_free(&tracker, live[i]);
+	assert(tracker.check_no_leaks());
+	assert(tracker.live_count() == 0);
+	assert(tracker.total_count() >= 1000);
+	tracker.free();
+}
