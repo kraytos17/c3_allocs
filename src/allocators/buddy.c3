@@ -4,6 +4,8 @@ import std::core::mem::alloc;
 import std::core::mem;
 
 const BUDDY_MIN_BLOCK = 64;
+const BUDDY_MIN_BLOCK_SHIFT = 6;
+$assert (1 << BUDDY_MIN_BLOCK_SHIFT) == BUDDY_MIN_BLOCK;
 const BUDDY_MAX_ORDERS = 64;
 const BUDDY_BLOCK_MAGIC @local = 0xB0DD7A11CE;
 
@@ -282,7 +284,7 @@ fn BuddyUsedHeader* buddy_used_header(BuddyAllocator* self, void* pointer) @loca
 	uptr block_start = header_addr - (uptr)header.block_offset;
 	if (block_start < self.region_base) return null;
 	if (!allocator_contains(self.region_base, self.region_size, block_start, block_size)) return null;
-	if ((block_start - self.region_base) % (uptr)block_size != 0) return null;
+	if (((block_start - self.region_base) & ((uptr)block_size - 1)) != 0) return null;
 	if (header.requested_size < 0 || header.requested_size > block_size) return null;
 	return header;
 }
@@ -484,7 +486,7 @@ fn bool BuddyAllocator.debug_verify(&self)
 		sz block_size = ((sz)BUDDY_MIN_BLOCK << order);
 		if (block_size <= 0 || block_size > self.region_size) return false;
 
-		sz cap = self.region_size / block_size + 1;
+		sz cap = (self.region_size >> (order + BUDDY_MIN_BLOCK_SHIFT)) + 1;
 		sz count = 0;
 		BuddyFree* block = self.free_heads[order];
 		while (block)
@@ -496,7 +498,7 @@ fn bool BuddyAllocator.debug_verify(&self)
 			if (addr < self.region_base) return false;
 			if (addr > uptr::max - (uptr)block_size) return false;
 			if (addr + (uptr)block_size > region_end) return false;
-			if ((addr - self.region_base) % (uptr)block_size != 0) return false;
+			if (((addr - self.region_base) & ((uptr)block_size - 1)) != 0) return false;
 			if (sum > self.region_size - block_size) return false;
 
 			sum += block_size;

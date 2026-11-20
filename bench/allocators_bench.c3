@@ -22,24 +22,28 @@ fn void bench_arena_acquire_release() @benchmark
 {
 	allocators::ArenaAllocator arena;
 	arena.init(arena_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = arena.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		arena.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_freelist_acquire_release() @benchmark
 {
 	allocators::FreeListAllocator list;
 	list.init(freelist_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = list.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		list.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_freelist_bestfit_acquire_release() @benchmark
@@ -47,12 +51,14 @@ fn void bench_freelist_bestfit_acquire_release() @benchmark
 	allocators::FreeListAllocator list;
 	list.init(freelist_storage[..]);
 	list.set_policy(allocators::FreeListPolicy.BEST_FIT);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = list.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		list.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_tracking_freelist_acquire_release() @benchmark
@@ -61,12 +67,14 @@ fn void bench_tracking_freelist_acquire_release() @benchmark
 	list.init(tracking_storage[..]);
 	allocators::TrackingAllocator tracker;
 	tracker.init(&list);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = allocators::trk_malloc(&tracker, 64);
 		if (catch ptr_opt) return;
 		allocators::trk_free(&tracker, ptr_opt);
 	}
+	@end_benchmark();
 	tracker.free();
 }
 
@@ -74,36 +82,42 @@ fn void bench_buddy_acquire_release() @benchmark
 {
 	allocators::BuddyAllocator buddy;
 	buddy.init(buddy_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = buddy.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		buddy.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_bitmap_buddy_acquire_release() @benchmark
 {
 	allocators::BitmapBuddyAllocator buddy;
 	buddy.init(bitmap_buddy_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = buddy.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		buddy.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_bitmap_buddy_sixteen_acquire_release() @benchmark
 {
 	allocators::BitmapBuddyAllocator buddy;
 	buddy.init(bitmap_buddy_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = buddy.acquire(16, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		buddy.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_poolchain_acquire_release() @benchmark
@@ -111,24 +125,46 @@ fn void bench_poolchain_acquire_release() @benchmark
 	char[][2] bufs = { chain_storage[0 : BENCH_BUFFER / 2], chain_storage[BENCH_BUFFER / 2 : BENCH_BUFFER / 2] };
 	allocators::PoolChainAllocator chain;
 	chain.init(bufs[..], 64);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = chain.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		chain.release(ptr_opt, false);
 	}
+	@end_benchmark();
+}
+
+fn void bench_synchronized_acquire_release() @benchmark
+{
+	allocators::PoolAllocator backing;
+	backing.init(pool_storage[..], 64);
+	allocators::SynchronizedAllocator sync;
+	sync.init(&backing);
+	@start_benchmark();
+	for (sz i = 0; i < BENCH_OPS; i++)
+	{
+		void*? ptr_opt = sync.acquire(64, alloc::AllocInitType.NO_ZERO);
+		if (catch ptr_opt) return;
+		sync.release(ptr_opt, false);
+	}
+
+	@end_benchmark();
+	sync.free();
 }
 
 fn void bench_pool_acquire_release() @benchmark
 {
 	allocators::PoolAllocator pool;
 	pool.init(pool_storage[..], 64);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = pool.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		pool.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_sizeclass_acquire_release() @benchmark
@@ -139,56 +175,70 @@ fn void bench_sizeclass_acquire_release() @benchmark
 	for (sz i = 0; i < 8; i++) sizes[i] = (sz)24 << i;
 	allocators::SizeClassAllocator sc;
 	sc.init(bufs[0:8], sizes[0:8]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = sc.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		sc.release(ptr_opt, false);
 	}
+	@end_benchmark();
 }
 
 fn void bench_arena_clear_cycle() @benchmark
 {
 	allocators::ArenaAllocator arena;
 	arena.init(arena_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		(void)arena.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
 	}
+
 	arena.clear();
+	@end_benchmark();
 }
 
 fn void bench_buddy_clear_cycle() @benchmark
 {
 	allocators::BuddyAllocator buddy;
 	buddy.init(buddy_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		(void)buddy.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
 	}
+
 	buddy.clear();
+	@end_benchmark();
 }
 
 fn void bench_freelist_clear_cycle() @benchmark
 {
 	allocators::FreeListAllocator list;
 	list.init(freelist_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		(void)list.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
 	}
+
 	list.clear();
+	@end_benchmark();
 }
 
 fn void bench_scratch_clear_cycle() @benchmark
 {
 	allocators::ScratchAllocator scratch;
 	scratch.init(scratch_storage[..]);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		(void)scratch.acquire(64, alloc::AllocInitType.NO_ZERO)!!;
 	}
+
 	scratch.clear();
+	@end_benchmark();
 }
 
 fn void bench_backed_arena_acquire_release() @benchmark
@@ -197,12 +247,15 @@ fn void bench_backed_arena_acquire_release() @benchmark
 	backing.init(backed_backing[..]);
 	c3_allocs::allocators::BackedArenaAllocator arena;
 	arena.init(backed_initial[..], &backing);
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i++)
 	{
 		void*? ptr_opt = arena.acquire(64, alloc::AllocInitType.NO_ZERO);
 		if (catch ptr_opt) return;
 		arena.release(ptr_opt, false);
 	}
+
+	@end_benchmark();
 	arena.free();
 }
 
@@ -217,6 +270,9 @@ fn void bench_freelist_fragmented_release() @benchmark
 		if (catch ptr_opt) return;
 		live[i] = ptr_opt;
 	}
+
+	@start_benchmark();
 	for (sz i = 0; i < BENCH_OPS; i += 2) list.release(live[i], false);
 	for (sz i = 1; i < BENCH_OPS; i += 2) list.release(live[i], false);
+	@end_benchmark();
 }

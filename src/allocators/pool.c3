@@ -64,20 +64,40 @@ fn PoolAllocator* PoolAllocator.init(&self, char[] storage, sz block_size, sz al
 	}
 
 	alignment = allocator_effective_alignment_min(alignment, PoolSlot::alignment);
-	assert(mem::is_valid_alignment(alignment), "Effective pool alignment must be valid.");
-
 	sz payload_offset = allocator_align_up_size(PoolSlot::size, alignment);
-	sz slot_size;
-	bool slot_size_ok = allocator_checked_add(payload_offset, block_size, &slot_size);
-	assert(slot_size_ok, "Pool block size overflows slot size.");
-	assert(slot_size <= sz::max - (alignment - 1), "Pool slot stride overflows.");
-	sz slot_stride = allocator_align_up_size(slot_size, alignment);
+	sz slot_size = 0;
+	sz slot_stride = 0;
+	sz first_slot_offset = 0;
+	sz capacity = 0;
+	uptr aligned_addr = 0;
+	bool layout_ok = allocator_checked_add(
+		payload_offset,
+		block_size,
+		&slot_size
+	) && slot_size <= sz::max - (alignment - 1);
+	if (layout_ok)
+	{
+		slot_stride = allocator_align_up_size(slot_size, alignment);
+		uptr base_addr = (uptr)storage.ptr;
+		aligned_addr = allocator_align_up_address(base_addr, alignment);
+		layout_ok = slot_stride > 0 && base_addr <= uptr::max - ((uptr)alignment - 1) && aligned_addr >= base_addr;
+	}
+	if (!layout_ok)
+	{
+		self.data = storage;
+		self.block_size = 0;
+		self.alignment = mem::DEFAULT_MEM_ALIGNMENT;
+		self.payload_offset = 0;
+		self.slot_stride = 0;
+		self.first_slot_offset = 0;
+		self.slot_count = 0;
+		self.free_count = 0;
+		self.free_head = null;
+		return self;
+	}
 
-	uptr base_addr = (uptr)storage.ptr;
-	uptr aligned_addr = allocator_align_up_address(base_addr, alignment);
-	assert(base_addr <= uptr::max - ((uptr)alignment - 1), "Pool buffer address overflows.");
-	sz first_slot_offset = (sz)(aligned_addr - base_addr);
-	sz capacity = first_slot_offset <= storage.len ? (storage.len - first_slot_offset) / slot_stride : 0;
+	first_slot_offset = (sz)(aligned_addr - (uptr)storage.ptr);
+	capacity = first_slot_offset <= storage.len ? (storage.len - first_slot_offset) / slot_stride : 0;
 
 	self.data = storage;
 	self.block_size = block_size;
@@ -253,6 +273,39 @@ fn PoolSlot* pool_slot_for_pointer(PoolAllocator* self, void* pointer) @local
 }
 
 <*
+ Release a slot if this pool owns it.
+
+ This combines the ownership test and the release into a single slot
+ lookup, so dispatchers over several pools pay one lookup instead of
+ two. A slot whose canary is corrupted counts as not owned and is left
+ alone, exactly as if `release` had ignored it.
+
+ @param [&inout] self : "The pool that may own the slot"
+ @param [drop] old_pointer : "A candidate slot payload, or null"
+ @param aligned : "Whether the original request specified alignment"
+ @return "True when this pool owned and released the slot"
+*>
+fn bool PoolAllocator.release_if_owned(&self, void* old_pointer, bool aligned)
+{
+	if (!old_pointer || !self.slot_stride || !self.slot_count) return false;
+
+	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
+	if (!slot || !slot.in_use || self.free_count >= self.slot_count) return false;
+	if (!allocator_canary_intact(
+		(char*)old_pointer + slot.requested_size,
+		self.block_size - slot.requested_size
+	)) return false;
+
+	allocator_poison_if_testing(old_pointer, slot.requested_size);
+	slot.in_use = false;
+	slot.requested_size = 0;
+	slot.next = self.free_head;
+	self.free_head = slot;
+	self.free_count++;
+	return true;
+}
+
+<*
  Release a slot acquired from this pool so it can be reused.
 
  Null, foreign, interior, and already-released pointers are ignored, as
@@ -269,19 +322,7 @@ fn void PoolAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 	$if env::TESTING:
 		defer assert(self.debug_verify(), "PoolAllocator invariant violated.");
 	$endif
-	PoolSlot* slot = pool_slot_for_pointer(self, old_pointer);
-	if (!slot || !slot.in_use || self.free_count >= self.slot_count) return;
-	if (!allocator_canary_intact(
-		(char*)old_pointer + slot.requested_size,
-		self.block_size - slot.requested_size
-	)) return;
-
-	allocator_poison_if_testing(old_pointer, slot.requested_size);
-	slot.in_use = false;
-	slot.requested_size = 0;
-	slot.next = self.free_head;
-	self.free_head = slot;
-	self.free_count++;
+	if (self.release_if_owned(old_pointer, aligned)) return;
 }
 
 <*

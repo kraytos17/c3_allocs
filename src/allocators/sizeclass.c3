@@ -143,26 +143,30 @@ fn sz SizeClassAllocator.class_count(&self) => self.num_classes;
 <*
  Return the maximum payload size of a class.
 
+ Out-of-range indices report zero instead of reading out of bounds.
+
  @param [&in] self : "The dispatcher to query"
  @param index : "The class index, below `class_count`"
- @return "The class block size"
+ @return "The class block size, or zero for a bad index"
 *>
 fn sz SizeClassAllocator.class_block_size(&self, sz index)
 {
-	assert(index >= 0 && index < self.num_classes, "Size class index out of range.");
+	if (index < 0 || index >= self.num_classes) return 0;
 	return self.pools[index].block_size;
 }
 
 <*
  Return the free slots of one class.
 
+ Out-of-range indices report zero instead of reading out of bounds.
+
  @param [&in] self : "The dispatcher to query"
  @param index : "The class index, below `class_count`"
- @return "The class free-slot count"
+ @return "The class free-slot count, or zero for a bad index"
 *>
 fn sz SizeClassAllocator.class_available(&self, sz index)
 {
-	assert(index >= 0 && index < self.num_classes, "Size class index out of range.");
+	if (index < 0 || index >= self.num_classes) return 0;
 	return self.pools[index].available();
 }
 
@@ -284,8 +288,8 @@ fn void*? SizeClassAllocator.resize(&self, void* old_pointer, sz new_size, sz al
 fn void SizeClassAllocator.release(&self, void* old_pointer, bool aligned) @dynamic
 {
 	if (!old_pointer) return;
-
-	sz owner = sizeclass_owner(self, old_pointer);
-	if (owner < 0) return;
-	self.pools[owner].release(old_pointer, aligned);
+	for (sz i = 0; i < self.num_classes; i++)
+	{
+		if (self.pools[i].release_if_owned(old_pointer, aligned)) return;
+	}
 }

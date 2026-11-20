@@ -121,8 +121,13 @@ fn void allocator_fill_canary(void* start, sz bytes)
 
 	char* cursor = (char*)start;
 	uptr base_addr = (uptr)start;
+	// Bytes before the first 8-byte boundary, capped at the region size
+	// so tiny regions never overshoot.
+	sz head = (sz)((-base_addr) & 7);
+	if (head > bytes) head = bytes;
+
 	sz done = 0;
-	while (done < bytes && (base_addr + (uptr)done) % 8 != 0)
+	while (done < head)
 	{
 		cursor[done++] = (char)ALLOCATOR_CANARY_BYTE;
 	}
@@ -154,8 +159,11 @@ fn bool allocator_canary_intact(void* start, sz bytes)
 
 	char* cursor = (char*)start;
 	uptr base_addr = (uptr)start;
+	sz head = (sz)((-base_addr) & 7);
+	if (head > bytes) head = bytes;
+
 	sz done = 0;
-	while (done < bytes && (base_addr + (uptr)done) % 8 != 0)
+	while (done < head)
 	{
 		if (cursor[done++] != (char)ALLOCATOR_CANARY_BYTE) return false;
 	}

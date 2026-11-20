@@ -9,7 +9,7 @@ BENCH_SOURCES := src/allocators/common.c3 src/allocators/arena.c3 \
 	src/allocators/bitmap_buddy.c3 \
 	src/allocators/sizeclass.c3 src/allocators/scratch.c3 \
 	src/allocators/typed.c3 src/allocators/tracking.c3 \
-	src/allocators/poolchain.c3 \
+	src/allocators/poolchain.c3 src/allocators/synchronized.c3 \
 	bench/allocators_bench.c3
 FUZZ_SOURCES := src/allocators/common.c3 src/allocators/arena.c3 \
 	src/allocators/pool.c3 src/allocators/backed_arena.c3 \

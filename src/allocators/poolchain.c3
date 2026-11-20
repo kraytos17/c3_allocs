@@ -250,10 +250,10 @@ fn void PoolChainAllocator.release(&self, void* old_pointer, bool aligned) @dyna
 		defer assert(self.debug_verify(), "PoolChainAllocator invariant violated.");
 	$endif
 	if (!old_pointer) return;
-
-	sz owner = poolchain_owner(self, old_pointer);
-	if (owner < 0) return;
-	self.pools[owner].release(old_pointer, aligned);
+	for (sz i = 0; i < self.num_links; i++)
+	{
+		if (self.pools[i].release_if_owned(old_pointer, aligned)) return;
+	}
 }
 
 <*

@@ -121,9 +121,11 @@ fn sz ScratchAllocator.mark(&self) => self.arena.mark();
 <*
  Reset to a mark, invalidating allocations made after it.
 
+ The mark is forwarded to the backing arena, whose reset ignores marks
+ beyond the used position.
+
  @param [&inout] self : "The allocator to reset"
  @param mark : "A saved scratch position"
- @require mark <= self.arena.bytes_reserved() : "The mark must not be beyond the current position"
 *>
 fn void ScratchAllocator.reset(&self, sz mark) => self.arena.reset(mark);
 

@@ -5,7 +5,8 @@ implement the standard library's `std::core::mem::alloc::Allocator` interface.
 
 ## Current status
 
-The repository currently contains ten allocators and one debug wrapper:
+The repository currently contains ten allocators, a debug wrapper,
+and a thread-safe wrapper:
 
 - **`ArenaAllocator`** — a fixed-capacity arena backed by a caller-provided
   byte slice. It supports alignment, zero-initialized allocation, resize,
@@ -44,6 +45,9 @@ The repository currently contains ten allocators and one debug wrapper:
   `trk_realloc`/`trk_free` macros capture the call site via the `$$FILE` /
   `$$FUNC` / `$$LINE` builtins, leaks are reported with those sites, and
   double releases are detected without reaching the wrapped allocator.
+- **`SynchronizedAllocator`** — a thread-safe wrapper that serializes
+  every operation on any allocator through one non-recursive mutex,
+  for sharing one allocator across threads.
 
 ## Requirements
 
@@ -139,7 +143,11 @@ reported average is per batch, not per allocation:
 
 Numbers vary by machine; compare within one run rather than across runs.
 Per-allocation overhead is observable through the byte stats instead
-(`bytes_reserved` vs payload, `bytes_used` vs `bytes_free`).
+(`bytes_reserved` vs payload, `bytes_used` vs `bytes_free`). Setup such
+as allocator init sits outside the timed region (`@start_benchmark`
+markers), so the table measures steady-state hot paths; the one
+exception is the clear-cycle benches, which time fill plus bulk reset
+together by design.
 
 One reference run on my machine (64-byte requests unless noted, batches of
 64 operations, 65536-byte buffers; averages, lower is better):
@@ -147,24 +155,27 @@ One reference run on my machine (64-byte requests unless noted, batches of
 | Benchmark                            | Avg per batch |
 | ------------------------------------ | ------------- |
 | arena acquire/release                | 0.36 us       |
-| backed arena acquire/release         | 0.52 us       |
-| pool acquire/release                 | 1.55 us       |
-| pool chain acquire/release           | 1.60 us       |
-| free-list first-fit acquire/release  | 1.09 us       |
-| free-list best-fit acquire/release   | 0.93 us       |
-| tracking over free-list acquire/release | 2.56 us    |
-| size-class acquire/release           | 2.11 us       |
-| buddy acquire/release                | 1.74 us       |
-| bitmap buddy acquire/release         | 4.00 us       |
-| bitmap buddy 16-byte acquire/release | 5.49 us       |
+| backed arena acquire/release         | 0.48 us       |
+| pool acquire/release                 | 0.38 us       |
+| pool chain acquire/release           | 0.57 us       |
+| synchronized acquire/release         | 1.39 us       |
+| free-list first-fit acquire/release  | 1.04 us       |
+| free-list best-fit acquire/release   | 0.97 us       |
+| tracking over free-list acquire/release | 2.57 us    |
+| size-class acquire/release           | 1.68 us       |
+| buddy acquire/release                | 1.78 us       |
+| bitmap buddy acquire/release         | 3.03 us       |
+| bitmap buddy 16-byte acquire/release | 3.50 us       |
 | arena clear cycle                    | 0.27 us       |
 | scratch clear cycle                  | 0.33 us       |
-| free-list clear cycle                | 0.58 us       |
-| buddy clear cycle                    | 0.72 us       |
-| free-list fragmented release         | 1.05 us       |
+| free-list clear cycle                | 0.56 us       |
+| buddy clear cycle                    | 0.70 us       |
+| free-list fragmented release         | 0.43 us       |
 
 The numbers are from an `-O2` build (`make bench` now passes `-O2` to the
-compiler); auto-vectorization pays off across the board. The bitmap buddy
+compiler); auto-vectorization pays off across the board. The synchronized
+wrapper costs about a microsecond per operation here: one mutex
+acquire/release around a pool acquire/release. The bitmap buddy
 stays slower per operation than the headered one because release walks
 the split bits to recover the order; its win is zero per-allocation
 metadata for tiny requests. Tracking overhead is about 3.4x here:
@@ -191,6 +202,7 @@ ignored. All hold at every optimization level.
 | Mostly-fits buffer with occasional overflow       | `BackedArenaAllocator`|
 | One fixed size, O(1) release, stable pointers     | `PoolAllocator`       |
 | One fixed size, but capacity must grow at runtime | `PoolChainAllocator`  |
+| Sharing one allocator across threads              | `SynchronizedAllocator` |
 | Typed slots derived from a struct                 | `TypedPool{Type}`     |
 | Mixed small sizes with bounded waste              | `SizeClassAllocator`  |
 | General variable sizes inside one buffer          | `FreeListAllocator`   |
@@ -524,6 +536,49 @@ tracker.free();
   leaks first.
 - The wrapper is not thread-safe.
 
+## Using `SynchronizedAllocator`
+
+`SynchronizedAllocator` wraps any allocator to make it safe for shared
+use across threads. Every operation takes one non-recursive mutex for
+its whole duration, so at most one thread is inside the backing
+allocator at a time.
+
+```c3
+import std::core::mem::alloc;
+import c3_allocs::allocators;
+
+char[4096] storage;
+allocators::PoolAllocator pool;
+pool.init(storage[..], 64, 0);
+
+allocators::SynchronizedAllocator sync;
+sync.init(&pool); // The same sync value is shared across threads.
+
+void* item = alloc::malloc(&sync, 48);
+// Use item while storage, pool, and sync remain alive.
+alloc::free(&sync, item);
+sync.free(); // Destroys the mutex; reinit before further use.
+```
+
+### Synchronized behavior and constraints
+
+- `acquire`, `release`, and `resize` behave exactly like the backing
+  allocator's, serialized by the mutex. A thread that cannot take the
+  lock fails the operation instead of waiting forever.
+- The mutex is not recursive: never call back into the same wrapper
+  from inside one of its operations. This cannot happen by accident,
+  since no allocator calls user code while holding the lock.
+- The wrapper holds no allocation metadata of its own, so ownership
+  and canary queries cannot pass through the erased `Allocator`
+  interface. Query the backing allocator directly, after quiescing
+  concurrent users. For the same reason there is no `debug_verify`;
+  verify the backing allocator instead.
+- `free()` destroys the mutex; using the wrapper afterwards without
+  reinitializing is rejected the same way as a failed init.
+- Run the test suite with ThreadSanitizer (`c3c test
+  --sanitize=thread`) to validate new uses under real threads; it is
+  not part of the default CI.
+
 ## Using `SizeClassAllocator`
 
 `SizeClassAllocator` routes mixed-size requests across fixed-size pools.
@@ -724,6 +779,7 @@ similar to mimalloc's debug mode:
 - `src/allocators/arena.c3` — the arena implementation.
 - `src/allocators/pool.c3` — the fixed-slot pool implementation.
 - `src/allocators/poolchain.c3` — the chained pool implementation.
+- `src/allocators/synchronized.c3` — the thread-safe wrapper.
 - `src/allocators/backed_arena.c3` — the arena with backing-allocator overflow.
 - `src/allocators/freelist.c3` — the variable-size free-list implementation.
 - `src/allocators/buddy.c3` — the binary buddy allocator.
@@ -746,7 +802,8 @@ similar to mimalloc's debug mode:
   `test/bitmap_buddy_test.c3`, `test/sizeclass_test.c3`,
   `test/scratch_test.c3`, `test/debug_test.c3`, `test/tracking_test.c3`,
   `test/common_test.c3`, `test/stress_test.c3`,
-  `test/poolchain_test.c3`, and
+  `test/poolchain_test.c3`,
+  `test/synchronized_test.c3`, and
   `test/hardening_test.c3` — allocator behavior, failure-path, storm,
   alignment-torture, and canary-guard tests.
 - `project.json` — C3 compiler project configuration.

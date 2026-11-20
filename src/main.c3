@@ -124,7 +124,19 @@ fn int main(String[] args)
 		tracker.live_bytes(),
 		tracker.report_leaks()
 	);
+
 	allocators::trk_free(&tracker, tracked);
 	tracker.free();
+
+	char[2048] sync_storage;
+	allocators::PoolAllocator sync_pool;
+	sync_pool.init(sync_storage[..], 64, 0);
+	allocators::SynchronizedAllocator sync;
+	sync.init(&sync_pool);
+
+	void* sync_item = alloc::malloc(&sync, 48);
+	io::printf("synchronized: valid=%d\n", sync.is_valid() ? 1 : 0);
+	alloc::free(&sync, sync_item);
+	sync.free();
 	return 0;
 }

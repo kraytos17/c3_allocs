@@ -186,6 +186,11 @@ fn void hardening_invalid_init_degrades_safely() @test
 	assert(pool.capacity() == 0);
 	assert(pool.available() == 0);
 
+	// Overflowed slot math must also degrade to an empty pool.
+	pool.init(pool_storage[..], sz::max, 0);
+	assert(pool.capacity() == 0);
+	assert(pool.available() == 0);
+
 	char[128] arena_storage;
 	allocators::ArenaAllocator arena;
 	arena.init(arena_storage[..]);
@@ -224,4 +229,11 @@ fn void hardening_invalid_init_degrades_safely() @test
 	assert(no_preset.class_count() == 0);
 	no_preset.init_preset(preset_storage[..], 100);
 	assert(no_preset.class_count() == 0);
+
+	// Out-of-range class queries report zero instead of reading
+	// out of bounds.
+	assert(classes.class_block_size(-1) == 0);
+	assert(classes.class_block_size(99) == 0);
+	assert(classes.class_available(-1) == 0);
+	assert(classes.class_available(99) == 0);
 }

@@ -4,6 +4,8 @@ import std::core::mem::alloc;
 import std::core::mem;
 
 const BITMAP_BUDDY_LEAF = 16;
+const BITMAP_BUDDY_LEAF_SHIFT = 4;
+$assert (1 << BITMAP_BUDDY_LEAF_SHIFT) == BITMAP_BUDDY_LEAF;
 const BITMAP_BUDDY_MAX_ORDERS = 64;
 
 <*
@@ -392,7 +394,9 @@ fn sz bitmap_buddy_find_order(BitmapBuddyAllocator* self, uptr address) @local
 {
 	for (sz k = 0; k < self.max_order; k++)
 	{
-		sz parent_index = (sz)((address - self.buddy_base) / (uptr)(((sz)BITMAP_BUDDY_LEAF) << (k + 1)));
+		// The parent block size is a power of two, so this shift
+		// is the division by it.
+		sz parent_index = (sz)((address - self.buddy_base) >> ((k + 1) + BITMAP_BUDDY_LEAF_SHIFT));
 		if (bitmap_buddy_bit(self.split_bits[k + 1], parent_index)) return k;
 	}
 	return self.max_order;
@@ -420,7 +424,7 @@ fn bool bitmap_buddy_locate(BitmapBuddyAllocator* self, void* pointer, sz* order
 
 	sz k = bitmap_buddy_find_order(self, address);
 	sz block_size = ((sz)BITMAP_BUDDY_LEAF) << k;
-	sz index = (sz)(offset / (uptr)block_size);
+	sz index = (sz)(offset >> (k + BITMAP_BUDDY_LEAF_SHIFT));
 	uptr start = self.buddy_base + ((uptr)index * (uptr)block_size);
 	if (start != address) return false;
 	if (!bitmap_buddy_bit(self.alloc_bits[k], index)) return false;
@@ -435,7 +439,8 @@ fn bool bitmap_buddy_locate(BitmapBuddyAllocator* self, void* pointer, sz* order
 
  Higher-order blocks start at multiples of their size relative to the base,
  which itself is only leaf-aligned, so blocks may need skipping until one
- address happens to satisfy the requested alignment.
+ address happens to satisfy the requested alignment. Alignments at or
+ below the leaf size skip the walk: the first block always qualifies.
 
  @param [&in] self : "The allocator whose free lists are searched"
  @param from_order : "The lowest order to scan"
@@ -450,6 +455,17 @@ fn BitmapBuddyFree** bitmap_buddy_find_fit(
 	sz* order_out
 ) @local
 {
+	if (effective_alignment > 0 && (uptr)effective_alignment <= (uptr)BITMAP_BUDDY_LEAF)
+	{
+		for (sz k = from_order; k <= self.max_order; k++)
+		{
+			if (!self.free_counts[k]) continue;
+			*order_out = k;
+			return &self.free_heads[k];
+		}
+		return null;
+	}
+
 	sz found_order = -1;
 	BitmapBuddyFree** found_link = null;
 	for (sz k = from_order; k <= self.max_order; k++)
@@ -510,7 +526,7 @@ fn void*? BitmapBuddyAllocator.acquire(&self, sz size, AllocInitType init_type, 
 
 	uptr block_start = (uptr)*found_link;
 	sz block_size = ((sz)BITMAP_BUDDY_LEAF) << found_order;
-	sz index = (sz)((block_start - self.buddy_base) / (uptr)block_size);
+	sz index = (sz)((block_start - self.buddy_base) >> (found_order + BITMAP_BUDDY_LEAF_SHIFT));
 	*found_link = (*found_link).next;
 	self.free_counts[found_order]--;
 	for (sz k = found_order; k > leaf_order; k--)
@@ -577,7 +593,7 @@ fn void BitmapBuddyAllocator.release(&self, void* old_pointer, bool aligned) @dy
 	uptr block_start = 0;
 	if (!bitmap_buddy_locate(self, old_pointer, &order, &block_start)) return;
 
-	sz index = (sz)((block_start - self.buddy_base) / (uptr)(((sz)BITMAP_BUDDY_LEAF) << order));
+	sz index = (sz)((block_start - self.buddy_base) >> (order + BITMAP_BUDDY_LEAF_SHIFT));
 	bitmap_buddy_clear_bit(self.alloc_bits[order], index);
 	allocator_poison_if_testing(old_pointer, ((sz)BITMAP_BUDDY_LEAF) << order);
 	self.free_bytes += ((sz)BITMAP_BUDDY_LEAF) << order;
@@ -681,9 +697,9 @@ fn bool BitmapBuddyAllocator.debug_verify(&self)
 			if (addr < self.buddy_base) return false;
 			if (addr > uptr::max - (uptr)block_size) return false;
 			if (addr + (uptr)block_size > managed_end) return false;
-			if ((addr - self.buddy_base) % (uptr)block_size != 0) return false;
+			if (((addr - self.buddy_base) & ((uptr)block_size - 1)) != 0) return false;
 
-			sz index = (sz)((addr - self.buddy_base) / (uptr)block_size);
+			sz index = (sz)((addr - self.buddy_base) >> (order + BITMAP_BUDDY_LEAF_SHIFT));
 			if (bitmap_buddy_bit(self.alloc_bits[order], index)) return false;
 			if (sum > self.managed_bytes - block_size) return false;
 
@@ -733,7 +749,7 @@ fn void*? BitmapBuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	sz new_block_size = ((sz)BITMAP_BUDDY_LEAF) << new_order;
 	if (new_order < order)
 	{
-		sz index = (sz)((block_start - self.buddy_base) / (uptr)old_size);
+		sz index = (sz)((block_start - self.buddy_base) >> (order + BITMAP_BUDDY_LEAF_SHIFT));
 		bitmap_buddy_clear_bit(self.alloc_bits[order], index);
 		// Poison before publishing: the tail region below becomes free
 		// ranges, and publishing afterwards overwrites the node headers
