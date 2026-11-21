@@ -2,6 +2,7 @@ module c3_allocs::allocators;
 
 import std::core::mem::alloc;
 import std::core::mem;
+import std::math;
 
 const BACKED_ARENA_HEADER_MAGIC @local = 0xBAA2E_A11C0C;
 
@@ -612,7 +613,7 @@ fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 		if (catch replacement_opt) return mem::OUT_OF_MEMORY~;
 
 		void* replacement = replacement_opt;
-		sz copy_size = initial_header.size < new_size ? initial_header.size : new_size;
+		sz copy_size = math::min(initial_header.size, new_size);
 		mem::copy(replacement, old_pointer, copy_size, mem::DEFAULT_MEM_ALIGNMENT, mem::DEFAULT_MEM_ALIGNMENT);
 		initial_header.in_use = false;
 		if (self.last_initial_header == initial_header) backed_arena_rewind_freed_initial(self);
@@ -639,7 +640,7 @@ fn void*? BackedArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	if (catch replacement_opt) return mem::OUT_OF_MEMORY~;
 
 	void* replacement = replacement_opt;
-	sz copy_size = old_page.requested_size < new_size ? old_page.requested_size : new_size;
+	sz copy_size = math::min(old_page.requested_size, new_size);
 	mem::copy(replacement, old_pointer, copy_size, mem::DEFAULT_MEM_ALIGNMENT, mem::DEFAULT_MEM_ALIGNMENT);
 	page_link = backed_arena_find_page_link(self, old_pointer);
 

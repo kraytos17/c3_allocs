@@ -2,6 +2,7 @@ module c3_allocs::allocators;
 
 import std::core::mem::alloc;
 import std::core::mem;
+import std::math;
 
 const BUDDY_MIN_BLOCK = 64;
 const BUDDY_MIN_BLOCK_SHIFT = 6;
@@ -313,7 +314,7 @@ fn void*? BuddyAllocator.acquire(&self, sz size, AllocInitType init_type, sz ali
 	if (!self.region_size) return mem::OUT_OF_MEMORY~;
 
 	sz effective = allocator_effective_alignment(alignment);
-	if (effective < BuddyUsedHeader::alignment) effective = BuddyUsedHeader::alignment;
+	effective = math::max(effective, (sz)BuddyUsedHeader::alignment);
 	if (size > self.region_size) return mem::INVALID_ALLOC_SIZE~;
 
 	sz leaf_order = 0;
@@ -564,7 +565,7 @@ fn void*? BuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz alignm
 	if (catch replacement_opt) return mem::OUT_OF_MEMORY~;
 
 	void* replacement = replacement_opt;
-	sz copy_size = old_requested < new_size ? old_requested : new_size;
+	sz copy_size = math::min(old_requested, new_size);
 	mem::copy(replacement, old_pointer, copy_size, mem::DEFAULT_MEM_ALIGNMENT, mem::DEFAULT_MEM_ALIGNMENT);
 	self.release(old_pointer, alignment > mem::DEFAULT_MEM_ALIGNMENT);
 	return replacement;

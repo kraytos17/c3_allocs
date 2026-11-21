@@ -155,22 +155,22 @@ One reference run on my machine (64-byte requests unless noted, batches of
 | Benchmark                            | Avg per batch |
 | ------------------------------------ | ------------- |
 | arena acquire/release                | 0.36 us       |
-| backed arena acquire/release         | 0.48 us       |
+| backed arena acquire/release         | 0.49 us       |
 | pool acquire/release                 | 0.38 us       |
-| pool chain acquire/release           | 0.57 us       |
-| synchronized acquire/release         | 1.39 us       |
-| free-list first-fit acquire/release  | 1.04 us       |
-| free-list best-fit acquire/release   | 0.97 us       |
-| tracking over free-list acquire/release | 2.57 us    |
-| size-class acquire/release           | 1.68 us       |
+| pool chain acquire/release           | 0.56 us       |
+| synchronized acquire/release         | 1.37 us       |
+| free-list first-fit acquire/release  | 0.95 us       |
+| free-list best-fit acquire/release   | 0.96 us       |
+| tracking over free-list acquire/release | 2.53 us    |
+| size-class acquire/release           | 1.69 us       |
 | buddy acquire/release                | 1.78 us       |
-| bitmap buddy acquire/release         | 3.03 us       |
-| bitmap buddy 16-byte acquire/release | 3.50 us       |
+| bitmap buddy acquire/release         | 3.02 us       |
+| bitmap buddy 16-byte acquire/release | 3.63 us       |
 | arena clear cycle                    | 0.27 us       |
 | scratch clear cycle                  | 0.33 us       |
-| free-list clear cycle                | 0.56 us       |
-| buddy clear cycle                    | 0.70 us       |
-| free-list fragmented release         | 0.43 us       |
+| free-list clear cycle                | 0.57 us       |
+| buddy clear cycle                    | 0.68 us       |
+| free-list fragmented release         | 0.42 us       |
 
 The numbers are from an `-O2` build (`make bench` now passes `-O2` to the
 compiler); auto-vectorization pays off across the board. The synchronized

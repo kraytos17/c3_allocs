@@ -1,6 +1,7 @@
 module c3_allocs::bench;
 
 import std::core::mem::alloc;
+import std::thread;
 import c3_allocs::allocators;
 
 const BENCH_BUFFER = 1 << 16;
@@ -148,6 +149,53 @@ fn void bench_synchronized_acquire_release() @benchmark
 		if (catch ptr_opt) return;
 		sync.release(ptr_opt, false);
 	}
+
+	@end_benchmark();
+	sync.free();
+}
+
+struct BenchSyncWork
+{
+	allocators::SynchronizedAllocator* sync;
+	sz iterations;
+}
+
+fn int bench_sync_worker(void* raw)
+{
+	BenchSyncWork* work = (BenchSyncWork*)raw;
+	for (sz i = 0; i < work.iterations; i++)
+	{
+		void*? ptr_opt = work.sync.acquire(64, alloc::AllocInitType.NO_ZERO);
+		if (catch ptr_opt) continue;
+
+		char* p = ptr_opt;
+		p[0] = (char)i;
+		work.sync.release(p, false);
+	}
+	return 0;
+}
+
+<*
+ Contended sharing: four threads hammer one synchronized pool. The
+ timed region includes thread spawn and join, so this measures the
+ end-to-end cost of sharing, not just the lock itself.
+*>
+fn void bench_synchronized_contention_acquire_release() @benchmark
+{
+	allocators::PoolAllocator backing;
+	backing.init(pool_storage[..], 64);
+	allocators::SynchronizedAllocator sync;
+	sync.init(&backing);
+
+	BenchSyncWork[4] works;
+	Thread[4] threads;
+	@start_benchmark();
+	for (sz i = 0; i < 4; i++)
+	{
+		works[i] = { .sync = &sync, .iterations = BENCH_OPS };
+		if (catch threads[i].create(&bench_sync_worker, &works[i])) return;
+	}
+	for (sz i = 0; i < 4; i++) threads[i].join();
 
 	@end_benchmark();
 	sync.free();

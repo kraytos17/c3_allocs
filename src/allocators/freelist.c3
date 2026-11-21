@@ -2,6 +2,7 @@ module c3_allocs::allocators;
 
 import std::core::mem::alloc;
 import std::core::mem;
+import std::math;
 
 const FREE_LIST_BLOCK_MAGIC @local = 0xF2EEB10C5A11;
 const FREE_LIST_NODE_MAGIC @local = 0xF2EE0C5A11F2EE;
@@ -477,8 +478,8 @@ fn void*? FreeListAllocator.acquire(&self, sz size, AllocInitType init_type, sz 
 	if (!self.free_head || !self.data.ptr) return mem::OUT_OF_MEMORY~;
 
 	sz effective = allocator_effective_alignment(alignment);
-	if (effective < FreeListFreeBlock::alignment) effective = FreeListFreeBlock::alignment;
-	if (effective < FreeListUsedHeader::alignment) effective = FreeListUsedHeader::alignment;
+	effective = math::max(effective, (sz)FreeListFreeBlock::alignment);
+	effective = math::max(effective, (sz)FreeListUsedHeader::alignment);
 	if (size > sz::max - FreeListUsedHeader::size - effective) return mem::INVALID_ALLOC_SIZE~;
 
 	uptr eff = (uptr)effective;
@@ -610,7 +611,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 	if (!header) return mem::INVALID_ALLOC_SIZE~;
 
 	sz effective = allocator_effective_alignment(alignment);
-	if (effective < FreeListFreeBlock::alignment) effective = FreeListFreeBlock::alignment;
+	effective = math::max(effective, (sz)FreeListFreeBlock::alignment);
 
 	uptr old_addr = (uptr)old_pointer;
 	uptr header_addr = (uptr)header;
@@ -713,7 +714,7 @@ fn void*? FreeListAllocator.resize(&self, void* old_pointer, sz new_size, sz ali
 	if (catch replacement_opt) return mem::OUT_OF_MEMORY~;
 
 	void* replacement = replacement_opt;
-	sz copy_size = old_requested < new_size ? old_requested : new_size;
+	sz copy_size = math::min(old_requested, new_size);
 	mem::copy(replacement, old_pointer, copy_size, mem::DEFAULT_MEM_ALIGNMENT, mem::DEFAULT_MEM_ALIGNMENT);
 	self.release(old_pointer, alignment > mem::DEFAULT_MEM_ALIGNMENT);
 	return replacement;

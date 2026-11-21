@@ -2,6 +2,7 @@ module c3_allocs::allocators;
 
 import std::core::mem::alloc;
 import std::core::mem;
+import std::math;
 
 const BITMAP_BUDDY_LEAF = 16;
 const BITMAP_BUDDY_LEAF_SHIFT = 4;
@@ -364,7 +365,7 @@ fn void BitmapBuddyAllocator.clear(&self)
 *>
 fn bool bitmap_buddy_leaf_order(sz size, sz effective_alignment, sz* order) @local
 {
-	sz wanted = size > effective_alignment ? size : effective_alignment;
+	sz wanted = math::max(size, effective_alignment);
 	if (wanted < 0) return false;
 
 	sz leaf_order = 0;
@@ -475,7 +476,8 @@ fn BitmapBuddyFree** bitmap_buddy_find_fit(
 		BitmapBuddyFree** link = &self.free_heads[k];
 		while (*link)
 		{
-			if ((uptr)*link % (uptr)effective_alignment == 0)
+			// Effective alignment is a validated power of two (see acquire).
+			if (mem::ptr_is_aligned(*link, effective_alignment))
 			{
 				found_order = k;
 				found_link = link;
@@ -602,16 +604,20 @@ fn void BitmapBuddyAllocator.release(&self, void* old_pointer, bool aligned) @dy
 	sz merged_order = order;
 	sz merged_size = ((sz)BITMAP_BUDDY_LEAF) << order;
 	sz merged_index = index;
+	// Block counts and sizes are powers of two, so the division and
+	// multiplication below are exact shifts.
 	while (merged_order < self.max_order)
 	{
 		sz buddy_index = merged_index ^ 1;
-		sz nblock = self.managed_bytes / (((sz)BITMAP_BUDDY_LEAF) << merged_order);
+		sz nblock = self.managed_bytes >> (merged_order + BITMAP_BUDDY_LEAF_SHIFT);
 		if (buddy_index >= nblock) break;
 		if (bitmap_buddy_bit(self.alloc_bits[merged_order], buddy_index)) break;
 		if (bitmap_buddy_bit(self.split_bits[merged_order], buddy_index)) break;
-		uptr buddy_start = self.buddy_base + ((uptr)buddy_index * (uptr)(((sz)BITMAP_BUDDY_LEAF) << merged_order));
+
+		uptr buddy_start = self.buddy_base + ((uptr)buddy_index << (merged_order + BITMAP_BUDDY_LEAF_SHIFT));
 		if (!bitmap_buddy_remove_free(self, merged_order, buddy_start)) break;
 		if (buddy_start < merged_start) merged_start = buddy_start;
+
 		bitmap_buddy_clear_bit(self.split_bits[merged_order + 1], merged_index >> 1);
 		merged_index >>= 1;
 		merged_order++;
@@ -778,7 +784,7 @@ fn void*? BitmapBuddyAllocator.resize(&self, void* old_pointer, sz new_size, sz 
 	if (catch replacement_opt) return mem::OUT_OF_MEMORY~;
 
 	void* replacement = replacement_opt;
-	sz copy_size = old_size < new_block_size ? old_size : new_block_size;
+	sz copy_size = math::min(old_size, new_block_size);
 	mem::copy(replacement, old_pointer, copy_size, mem::DEFAULT_MEM_ALIGNMENT, mem::DEFAULT_MEM_ALIGNMENT);
 	self.release(old_pointer, alignment > mem::DEFAULT_MEM_ALIGNMENT);
 	return replacement;

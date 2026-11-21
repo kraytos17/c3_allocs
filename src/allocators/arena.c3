@@ -2,6 +2,7 @@ module c3_allocs::allocators;
 
 import std::core::mem::alloc;
 import std::core::mem;
+import std::math;
 
 <*
  A fixed-capacity arena allocator backed by caller-owned memory.
@@ -245,7 +246,7 @@ fn void*? ArenaAllocator.resize(&self, void* old_pointer, sz new_size, sz alignm
 	if (catch new_pointer_opt) return mem::OUT_OF_MEMORY~;
 
 	void* new_pointer = new_pointer_opt;
-	sz copy_size = old_size < new_size ? old_size : new_size;
+	sz copy_size = math::min(old_size, new_size);
 	mem::copy(new_pointer, old_pointer, copy_size, mem::DEFAULT_MEM_ALIGNMENT, mem::DEFAULT_MEM_ALIGNMENT);
 	return new_pointer;
 }

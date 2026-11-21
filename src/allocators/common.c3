@@ -12,6 +12,7 @@ module c3_allocs::allocators;
 
 import std::core::mem::alloc;
 import std::core::mem;
+import std::math;
 
 <*
  Check whether an optional allocation alignment is valid.
@@ -34,9 +35,7 @@ fn bool allocator_valid_alignment(sz alignment) => !alignment || mem::is_valid_a
  @param alignment : "The requested alignment, or zero for the default"
  @return "The alignment to use for layout calculations"
 *>
-fn sz allocator_effective_alignment(
-	sz alignment
-) => alignment < mem::DEFAULT_MEM_ALIGNMENT ? mem::DEFAULT_MEM_ALIGNMENT : alignment;
+fn sz allocator_effective_alignment(sz alignment) => math::max(alignment, (sz)mem::DEFAULT_MEM_ALIGNMENT);
 
 <*
  Return the effective alignment with an additional minimum.
@@ -51,7 +50,7 @@ fn sz allocator_effective_alignment(
 fn sz allocator_effective_alignment_min(sz alignment, sz minimum)
 {
 	sz effective = allocator_effective_alignment(alignment);
-	return effective < minimum ? minimum : effective;
+	return math::max(effective, minimum);
 }
 
 <*
@@ -281,7 +280,7 @@ fn sz allocator_floor_pow2(sz value)
  @param value : "The value to test"
  @return "True when the value is a positive power of two"
 *>
-fn bool allocator_is_pow2(sz value) => value > 0 && ((uptr)value & ((uptr)value - 1)) == 0;
+fn bool allocator_is_pow2(sz value) => value > 0 && math::is_power_of_2(value);
 
 <*
  Check whether a `[address, address + size)` range lies in a borrowed buffer.
